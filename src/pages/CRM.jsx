@@ -1154,7 +1154,7 @@ export default function CRM() {
                   id: docSnap.id,
                   ...data,
                   _sourceCollection: sourceName,
-                  _segmentName: seg === 'happymoves' ? 'Happy Moves' : 'Game Faktory',
+                  _segmentName: seg === 'happymoves' ? 'StreetTalks' : 'Game Faktory',
                   _sourceTab: col === 'leads' ? 'regular' : col === 'adLeads' ? 'ads' : 'distributors'
                 });
               }
@@ -1575,7 +1575,7 @@ export default function CRM() {
               className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[13px] font-bold transition-all duration-300 ${activeSegment === 'happymoves' ? 'bg-white text-black shadow-[0_2px_10px_rgba(0,0,0,0.06)]' : 'text-zinc-500 hover:text-zinc-800'}`}
             >
               <div className={`w-2 h-2 rounded-full ${activeSegment === 'happymoves' ? 'bg-emerald-500' : 'bg-transparent'}`} />
-              Happy Moves
+              StreetTalks
             </button>
             <button 
               onClick={() => setActiveSegment('gamefaktory')}

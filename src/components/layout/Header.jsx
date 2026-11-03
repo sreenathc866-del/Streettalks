@@ -57,7 +57,7 @@ export function Header() {
   }, []);
 
   const getInitials = (name) => {
-    if (!name) return 'OQ';
+    if (!name) return 'ST';
     const parts = name.split(' ').filter(Boolean);
     if (parts.length > 1) {
       return (parts[0][0] + parts[1][0]).toUpperCase();
@@ -65,9 +65,9 @@ export function Header() {
     return name.slice(0, 2).toUpperCase();
   };
 
-  const displayName = isAdmin ? 'Oqulix Admin' : (employeeData?.name || 'Employee');
+  const displayName = isAdmin ? 'StreetTalks Admin' : (employeeData?.name || 'Employee');
   const displayRole = isAdmin ? 'Super Admin' : (employeeData?.position || 'Team Member');
-  const displayInitials = isAdmin ? 'OQ' : getInitials(employeeData?.name);
+  const displayInitials = isAdmin ? 'ST' : getInitials(employeeData?.name);
 
   const handleProfileClick = () => {
     setEditName(displayName);
@@ -265,7 +265,7 @@ export function Header() {
                     onChange={(e) => setDefaultSegment(e.target.value)}
                     className="w-full px-4 py-2.5 bg-zinc-50 border border-zinc-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-black/5 focus:bg-white transition-all"
                   >
-                    <option value="happymoves">Happy Moves</option>
+                    <option value="happymoves">StreetTalks</option>
                     <option value="gamefaktory">Game Faktory</option>
                   </select>
                 </div>

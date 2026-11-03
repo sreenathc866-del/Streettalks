@@ -87,7 +87,7 @@ export default function Dashboard() {
                   id: docSnap.id,
                   ...data,
                   _sourceCollection: sourceName,
-                  _segmentName: seg === 'happymoves' ? 'Happy Moves' : 'Game Faktory',
+                  _segmentName: seg === 'happymoves' ? 'StreetTalks' : 'Game Faktory',
                   _sourceTab: col === 'leads' ? 'regular' : col === 'adLeads' ? 'ads' : 'distributors'
                 });
               }
