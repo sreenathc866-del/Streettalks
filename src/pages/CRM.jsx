@@ -1,0 +1,3301 @@
+import React, { useState, useEffect } from 'react';
+import { ArrowUp, ArrowUpDown, Plus, Search, Filter, MoreHorizontal, Phone, Mail, Calendar, User, Building2, MapPin, Target, AlertCircle, X, DollarSign, Briefcase, Hash, Clock, FileText, CheckCircle, Tag, Globe, MessageSquare, ChevronLeft, ChevronRight, Loader2, Copy, Info, Download, Upload, ArrowRightLeft, Megaphone, TrendingUp, Flame } from 'lucide-react';
+import { doc, getDoc, getDocs, updateDoc, setDoc, deleteDoc, collection, arrayUnion, serverTimestamp, writeBatch } from 'firebase/firestore';
+import { db } from '../firebase';
+import { useAuthStore } from '../store/authStore';
+import Swal from 'sweetalert2';
+import { useLocation, useNavigate } from 'react-router-dom';
+import Pagination from '../components/Pagination';
+import QuickUpdateModal from '../components/QuickUpdateModal';
+import { crmCache, clearCRMCache } from '../store/crmCache';
+
+const LEAD_STATUS_OPTIONS = [
+  { value: 'New Lead', label: 'New Lead' },
+  { value: 'Called, no response', label: 'Called, No Response' },
+  { value: 'Contacted', label: 'Contacted' },
+  { value: 'Connected via whatsapp', label: 'Connected via whatsapp' },
+  { value: 'Interested', label: 'Interested' },
+  { value: 'Follow up needed', label: 'Follow-Up Needed' },
+  { value: 'Quotation Sent', label: 'Quotation Sent' },
+  { value: 'Awaiting Decision', label: 'Awaiting Decision' },
+  { value: 'Token Recieved', label: 'Token Recieved' },
+  { value: 'Deal Closed', label: 'Converted (Deal Won)' },
+  { value: 'Deal Lost', label: 'Not Interested (Deal Lost)' }
+];
+
+const DISTRIBUTOR_STATUS_OPTIONS = [
+  { value: "Haven't yet contacted", label: "Haven't yet contacted" },
+  { value: "Called, no response", label: "Called, no response" },
+  { value: "Contacted and discussed via phone", label: "Contacted and discussed via phone" },
+  { value: "Online demo done", label: "Online demo done" },
+  { value: "Live demo done", label: "Live demo done" },
+  { value: "Hospital presentation done", label: "Hospital presentation done" },
+  { value: "Agreement Sent & awaiting response", label: "Agreement Sent & waiting" },
+  { value: "Agreement Signed", label: "Agreement Signed" },
+  { value: "Purchased Demo Piece", label: "Purchased Demo Piece" },
+  { value: "Doing Sales", label: "Doing Sales" },
+  { value: "Inactive", label: "Inactive" },
+  { value: "Terminated", label: "Terminated" }
+];
+
+export default function CRM() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { user, isAdmin, isManager, companyId, employeeData, isAdLeadManager, isHR } = useAuthStore();
+  
+  const [activeSegment, setActiveSegment] = useState(employeeData?.crmPreferences?.defaultSegment || 'happymoves');
+  const [activeTab, setActiveTab] = useState(employeeData?.crmPreferences?.defaultTab || 'ads');
+  const [regularLeads, setRegularLeads] = useState([]);
+  const [adLeads, setAdLeads] = useState([]);
+  const [distributors, setDistributors] = useState([]);
+  const [allGlobalClients, setAllGlobalClients] = useState([]);
+  const [similarClients, setSimilarClients] = useState([]);
+  const [showSimilarClientsFor, setShowSimilarClientsFor] = useState('');
+  const [todaysGlobalFollowUps, setTodaysGlobalFollowUps] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedLead, setSelectedLead] = useState(null);
+  const [quickUpdateLead, setQuickUpdateLead] = useState(null);
+  const [updateStatus, setUpdateStatus] = useState('');
+  const [updateRemarks, setUpdateRemarks] = useState('');
+  const [updateStatusDate, setUpdateStatusDate] = useState(new Date().toISOString().split('T')[0]);
+  
+  useEffect(() => {
+    if (quickUpdateLead) {
+      let lastDate = new Date().toISOString().split('T')[0];
+      if (quickUpdateLead.statusHistory && quickUpdateLead.statusHistory.length > 0) {
+        const lastEntry = quickUpdateLead.statusHistory[quickUpdateLead.statusHistory.length - 1];
+        if (lastEntry.date) {
+          lastDate = new Date(lastEntry.date).toISOString().split('T')[0];
+        }
+      } else if (quickUpdateLead.date) {
+        lastDate = new Date(quickUpdateLead.date).toISOString().split('T')[0];
+      } else if (quickUpdateLead.createdAt) {
+        const dateVal = quickUpdateLead.createdAt.seconds ? quickUpdateLead.createdAt.seconds * 1000 : quickUpdateLead.createdAt;
+        lastDate = new Date(dateVal).toISOString().split('T')[0];
+      }
+      setUpdateStatusDate(lastDate);
+    }
+  }, [quickUpdateLead]);
+
+  const isDigitalMarketing = employeeData?.position?.trim().toLowerCase() === 'digital marketing';
+  const canManageAdLeads = isDigitalMarketing || isAdLeadManager;
+  
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 100;
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+  const [employeeFilter, setEmployeeFilter] = useState('');
+  const [monthFilter, setMonthFilter] = useState('');
+  const [leadTypeFilter, setLeadTypeFilter] = useState('');
+  const [priorityFilter, setPriorityFilter] = useState('All');
+  const [showIrregularPhonesOnly, setShowIrregularPhonesOnly] = useState(false);
+  const [showMissedFollowUpsOnly, setShowMissedFollowUpsOnly] = useState(false);
+  const [showFrequentlyContactedOnly, setShowFrequentlyContactedOnly] = useState(false);
+  const [exactDateFilter, setExactDateFilter] = useState('');
+  const [exactDateFilterType, setExactDateFilterType] = useState('added');
+  const [sortBy, setSortBy] = useState('added-desc');
+
+  const getFilteredItemsForUser = (items, type = 'leads') => {
+    if (isAdmin || isManager || isHR || !user?.uid || user.uid === '2K5X44krNabacvlJFgpvsVpDQHi1') return items;
+    if (type === 'adLeads' && canManageAdLeads) return items;
+    return items.filter(item => item.userId === user.uid || item.assignedToUid === user.uid);
+  };
+
+
+
+  // Add Lead Modal State
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isAdLeadModalOpen, setIsAdLeadModalOpen] = useState(false);
+  const [isBulkAdLeadModalOpen, setIsBulkAdLeadModalOpen] = useState(false);
+  const [bulkAdLeadText, setBulkAdLeadText] = useState('');
+  const [bulkAdLeadAssignedToUid, setBulkAdLeadAssignedToUid] = useState('');
+  const [bulkAdLeadAssignedToName, setBulkAdLeadAssignedToName] = useState('');
+  const [bulkAdLeadCampaign, setBulkAdLeadCampaign] = useState('');
+  const [isDistributorModalOpen, setIsDistributorModalOpen] = useState(false);
+  const [isActiveDistributorModalOpen, setIsActiveDistributorModalOpen] = useState(false);
+  const [activeDistributorFormData, setActiveDistributorFormData] = useState({
+    agreementDate: new Date().toISOString().split('T')[0],
+    agreementDurationMonths: '',
+    territoryExclusivity: 'Non-Exclusive',
+    distributorPrice: '',
+    minimumTarget: '',
+    remarks: ''
+  });
+  const [convertingDistributorId, setConvertingDistributorId] = useState(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [editingLeadId, setEditingLeadId] = useState(null);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferTargetEmployee, setTransferTargetEmployee] = useState(null);
+  const [allEmployees, setAllEmployees] = useState([]);
+  const [segmentClients, setSegmentClients] = useState([]);
+  const [globalClients, setGlobalClients] = useState([]);
+  const [adCampaignsList, setAdCampaignsList] = useState([]);
+  const [formData, setFormData] = useState({
+    date: new Date().toISOString().split('T')[0],
+    name: '',
+    clientName: '',
+    priority: '',
+    place: '',
+    country: '',
+    personOfContact: '',
+    pocDesignation: '',
+    contactNo: '',
+    personOfContact2: '',
+    contactNo2: '',
+    referralPerson: '',
+    email: '',
+    currentStatus: 'New Lead',
+    fPrice: '',
+    lPrice: '',
+    lastContacted: '',
+    nextFollowUp: '',
+    remarks: '',
+    leadType: 'Hospital',
+    customLeadType: '',
+    assignedToName: '',
+    message: ''
+  });
+
+  const [adLeadFormData, setAdLeadFormData] = useState({
+    name: '',
+    institutionName: '',
+    contactNumber: '',
+    region: '',
+    leadType: 'Hospital',
+    customLeadType: '',
+    currentStatus: 'New Lead',
+    priority: 'Medium',
+    remarks: '',
+    followUpDate: '',
+    assignedToUid: '',
+    assignedToName: '',
+    message: '',
+    campaign: ''
+  });
+
+  const [distributorFormData, setDistributorFormData] = useState({
+    distributorName: '', state: '', region: '', exclusive: '',
+    teamSize: '', contactPersonName: '', contactNumber: '', email: '',
+    address: '', gstNumber: '', establishedYear: '',
+    currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '',
+    productLinesHandled: '', territoryDescription: '', remarks: '',
+  });
+
+  // Auto-fill assignedToName for employees when modal opens
+  const availableRegions = React.useMemo(() => {
+    const regions = new Set();
+    allEmployees.forEach(emp => {
+      if (emp.assignedRegions) {
+        emp.assignedRegions.split(',').forEach(r => {
+          const trimmed = r.trim();
+          if (trimmed) regions.add(trimmed);
+        });
+      }
+    });
+    return Array.from(regions).sort();
+  }, [allEmployees]);
+  useEffect(() => {
+    if ((isModalOpen || isAdLeadModalOpen || isDistributorModalOpen) && (!isAdmin && !isManager && !canManageAdLeads) && employeeData) {
+      setFormData(prev => ({ ...prev, assignedToName: employeeData.name }));
+      setAdLeadFormData(prev => ({ ...prev, assignedToName: employeeData.name, assignedToUid: user.uid }));
+    }
+  }, [isModalOpen, isAdLeadModalOpen, isDistributorModalOpen, isAdmin, isManager, canManageAdLeads, employeeData, user]);
+
+  const handleInputChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+    if (['name', 'clientName', 'personOfContact', 'contactNo', 'phone'].includes(name)) {
+      setShowSimilarClientsFor(name);
+      getSimilarClients(value);
+    }
+  };
+  const handleAdLeadInputChange = (e) => {
+    const { name, value } = e.target;
+    setAdLeadFormData(prev => {
+      const newData = { ...prev, [name]: value };
+      
+      // Auto-assign employee based on region match
+      if (name === 'region' && value.trim() && (isAdmin || isManager || canManageAdLeads)) {
+        const searchRegion = value.trim().toLowerCase();
+        const matchedEmp = allEmployees.find(emp => {
+          if (!emp.assignedRegions) return false;
+          const empRegions = emp.assignedRegions.split(',').map(r => r.trim().toLowerCase());
+          return empRegions.includes(searchRegion);
+        });
+        
+        if (matchedEmp) {
+           newData.assignedToUid = matchedEmp.uid;
+           newData.assignedToName = matchedEmp.name;
+        }
+      }
+      
+      return newData;
+    });
+    if (['name', 'institutionName', 'contactNumber', 'phone'].includes(name)) {
+      setShowSimilarClientsFor(name);
+      getSimilarClients(value);
+    }
+  };
+  const handleDistributorInputChange = (e) => {
+    const { name, value } = e.target;
+    setDistributorFormData(prev => ({ ...prev, [name]: value }));
+    if (['distributorName', 'contactPersonName', 'contactNumber'].includes(name)) {
+      setShowSimilarClientsFor(name);
+      getSimilarClients(value);
+    }
+  };
+
+  const updateGlobalClientList = async (clientName, associateName) => {
+    if (!clientName || !companyId) return;
+    try {
+      const formattedString = `${clientName} (${associateName || 'Unknown Associate'})`;
+      const globalRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'allClients');
+      await setDoc(globalRef, {
+        clients: arrayUnion({
+          clientName: clientName,
+          associateName: associateName || 'Unknown Associate',
+          segment: activeSegment,
+          formattedString
+        })
+      }, { merge: true });
+    } catch (error) {
+      console.error("Error updating global client list:", error);
+    }
+  };
+
+  const getDuplicateWarning = (name) => {
+    if (!name || name.trim() === '') return null;
+    
+    const searchStr = name.trim().toLowerCase();
+    const currentSegmentClients = globalClients.filter(c => c.segment === activeSegment);
+    const exactMatch = currentSegmentClients.find(c => c.clientName.toLowerCase() === searchStr);
+    
+    if (exactMatch) {
+      return (
+        <div className="w-full mt-2 px-3 py-2 bg-amber-50 border border-amber-200/60 rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span className="text-[12px] text-amber-800 font-medium">
+            This client already exists! (Added by: <span className="font-bold">{exactMatch.associateName}</span>).
+          </span>
+        </div>
+      );
+    }
+
+    if (searchStr.length >= 3) {
+      const partialMatches = currentSegmentClients.filter(c => c.clientName.toLowerCase().includes(searchStr) && c.clientName.toLowerCase() !== searchStr).slice(0, 5);
+      
+      if (partialMatches.length > 0) {
+        return (
+          <div className="w-full mt-2 px-3 py-2 bg-blue-50 border border-blue-200/60 rounded-lg flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <Info className="w-4 h-4 text-blue-600 shrink-0" />
+              <span className="text-[12px] text-blue-800 font-medium">
+                Similar existing clients found:
+              </span>
+            </div>
+            <div className="pl-6 flex flex-col gap-1">
+              {partialMatches.map((match, idx) => (
+                <div key={idx} className="text-[11px] text-blue-700">
+                  <span className="font-semibold">{match.clientName}</span> (Added by: {match.associateName})
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      }
+    }
+    return null;
+  };
+
+  const handleSaveLead = async (e) => {
+    e.preventDefault();
+    if (!companyId) return;
+    setIsSubmitting(true);
+    try {
+      const finalLeadType = formData.leadType === 'Other' ? formData.customLeadType : formData.leadType;
+      
+      const leadPayload = {
+        date: formData.date,
+        name: formData.clientName || formData.name,
+        clientName: formData.clientName || formData.name,
+        priority: formData.priority,
+        place: formData.place,
+        region: formData.place,
+        country: formData.country,
+        personOfContact: formData.personOfContact,
+        pocDesignation: formData.pocDesignation,
+        contactNo: formData.contactNo,
+        personOfContact2: formData.personOfContact2,
+        contactNo2: formData.contactNo2,
+        referralPerson: formData.referralPerson,
+        email: formData.email,
+        currentStatus: formData.currentStatus,
+        fPrice: formData.fPrice,
+        lPrice: formData.lPrice,
+        lastContacted: formData.lastContacted,
+        nextFollowUp: formData.nextFollowUp,
+        remarks: formData.remarks,
+        leadType: finalLeadType,
+        assignedToName: formData.assignedToName,
+        message: formData.message,
+        updatedAt: new Date()
+      };
+
+      const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'leads', 'items', editingLeadId || doc(collection(db, 'temp')).id);
+      
+      const leadData = {
+        id: docRef.id,
+        ...leadPayload,
+        updatedAt: serverTimestamp()
+      };
+
+      if (!editingLeadId) {
+        leadData.createdAt = serverTimestamp();
+        leadData.userId = user.uid;
+        leadData.assignedToUid = user.uid;
+        leadData.employeeName = isAdmin ? 'Admin' : (employeeData?.name || 'Employee');
+        leadData.addedByName = isAdmin ? 'Admin' : (employeeData?.name || 'Employee');
+        leadData.newLead = true;
+        leadData.currentStatus = leadPayload.currentStatus || 'New Lead';
+        leadData.date = new Date().toISOString().slice(0, 10);
+      }
+
+      await setDoc(docRef, leadData, { merge: true });
+      
+      const savedClientName = leadPayload.clientName || leadPayload.name;
+      const savedAssociate = leadPayload.assignedToName || (isAdmin ? 'Admin' : (employeeData?.name || 'Employee'));
+      await updateGlobalClientList(savedClientName, savedAssociate);
+
+      if (editingLeadId) {
+        setRegularLeads(prev => prev.map(it => it.id === editingLeadId ? { ...it, ...leadData } : it));
+      } else {
+        setRegularLeads(prev => [{ ...leadData }, ...prev]);
+      }
+      
+      setIsModalOpen(false);
+      setEditingLeadId(null);
+      setFormData({ 
+        date: new Date().toISOString().split('T')[0], clientName: '', name: '', priority: '', place: '', country: '', 
+        personOfContact: '', pocDesignation: '', contactNo: '', personOfContact2: '', contactNo2: '', 
+        referralPerson: '', email: '', currentStatus: 'New Lead', fPrice: '', lPrice: '', 
+        lastContacted: '', nextFollowUp: '', remarks: '', leadType: 'Hospital', customLeadType: '', 
+        assignedToName: isAdmin ? '' : (employeeData?.name || ''), message: '' 
+      });
+    } catch (err) {
+      console.error("Error saving lead:", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleBulkSaveAdLeads = async (e) => {
+    e.preventDefault();
+    if (!companyId) return;
+    
+    if (!bulkAdLeadText.trim()) {
+      Swal.fire({ icon: "warning", title: "No Input", text: "Please paste some phone numbers." });
+      return;
+    }
+    if (!bulkAdLeadAssignedToUid) {
+      Swal.fire({ icon: "warning", title: "No Employee Selected", text: "Please assign these leads to an employee." });
+      return;
+    }
+
+    // Use regex to extract whole phone numbers even if they contain spaces inside (e.g. "+91 99515 10645")
+    const extractedTokens = bulkAdLeadText.match(/(?:\+\d{1,4}\s?)?(?:\d[\s-]*){7,15}\d/g) || [];
+    
+    // Clean each token (remove all spaces/dashes) and ensure length is valid
+    const cleanNumbers = extractedTokens
+      .map(token => token.replace(/[^\d+]/g, ''))
+      .filter(token => token.length >= 7);
+      
+    const uniqueNumbers = [...new Set(cleanNumbers)];
+
+    if (uniqueNumbers.length === 0) {
+      Swal.fire({ icon: "warning", title: "No Valid Numbers", text: "Could not extract any valid phone numbers." });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const batch = writeBatch(db);
+      
+      const newLeads = uniqueNumbers.map(num => {
+        const newDocRef = doc(collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'adLeads', 'items'));
+        return {
+          id: newDocRef.id,
+          name: 'Unknown',
+          institutionName: '',
+          contactNumber: num,
+          contactNo: num,
+          region: '',
+          leadType: 'Other',
+          priority: 'Medium',
+          remarks: '',
+          followUpDate: '',
+          assignedToUid: bulkAdLeadAssignedToUid,
+          assignedToName: bulkAdLeadAssignedToName,
+          message: '',
+          campaign: bulkAdLeadCampaign,
+          updatedAt: serverTimestamp(),
+          currentStatus: 'New Lead',
+          newLead: true,
+          employeeName: isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee')),
+          addedByName: isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee')),
+          userId: bulkAdLeadAssignedToUid,
+          date: new Date().toISOString().slice(0, 10),
+          createdAt: serverTimestamp(),
+        };
+      });
+
+      newLeads.forEach(leadData => {
+        const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'adLeads', 'items', leadData.id);
+        batch.set(docRef, leadData);
+      });
+
+      await batch.commit();
+
+      const localNewLeads = newLeads.map(l => ({...l, createdAt: new Date(), updatedAt: new Date()}));
+      
+      setAdLeads(prev => [...localNewLeads, ...prev]);
+
+      setIsBulkAdLeadModalOpen(false);
+      setBulkAdLeadText('');
+      setBulkAdLeadAssignedToUid('');
+      setBulkAdLeadAssignedToName('');
+      setBulkAdLeadCampaign('');
+      
+      Swal.fire({ icon: "success", title: "Success", text: `Successfully added ${newLeads.length} leads.` });
+    } catch (error) {
+      console.error("Error bulk adding leads:", error);
+      Swal.fire({ icon: "error", title: "Error", text: "Failed to add bulk leads. Please try again." });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSaveAdLead = async (e) => {
+    e.preventDefault();
+    if (!companyId) return;
+    
+    if (!adLeadFormData.contactNumber.trim()) {
+      Swal.fire({ icon: "warning", title: "Missing Fields", text: "Contact Number is required." });
+      return;
+    }
+    if (!adLeadFormData.assignedToUid && isAdmin) {
+      Swal.fire({ icon: "warning", title: "Please assign this lead to an employee." });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const finalLeadType = adLeadFormData.leadType === 'Other' ? adLeadFormData.customLeadType : adLeadFormData.leadType;
+      
+      const payload = {
+        name: adLeadFormData.name.trim() || 'Unknown',
+        institutionName: adLeadFormData.institutionName,
+        contactNumber: adLeadFormData.contactNumber,
+        contactNo: adLeadFormData.contactNumber, // for consistency
+        region: adLeadFormData.region,
+        leadType: finalLeadType,
+        priority: adLeadFormData.priority,
+        currentStatus: adLeadFormData.currentStatus,
+        remarks: adLeadFormData.remarks,
+        followUpDate: adLeadFormData.followUpDate,
+        assignedToUid: (isAdmin || isManager || canManageAdLeads) ? adLeadFormData.assignedToUid : user.uid,
+        assignedToName: (isAdmin || isManager || canManageAdLeads) ? adLeadFormData.assignedToName : (employeeData?.name || ''),
+        message: adLeadFormData.message,
+        campaign: adLeadFormData.campaign || '',
+        updatedAt: new Date()
+      };
+
+      const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'adLeads', 'items', editingLeadId || doc(collection(db, 'temp')).id);
+      
+      const leadData = {
+        id: docRef.id,
+        ...payload,
+        updatedAt: serverTimestamp()
+      };
+
+      if (!editingLeadId) {
+        leadData.createdAt = serverTimestamp();
+        leadData.userId = (isAdmin || isManager || canManageAdLeads) ? payload.assignedToUid : user.uid;
+        leadData.employeeName = isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee'));
+        leadData.addedByName = isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee'));
+        leadData.newLead = true;
+        leadData.currentStatus = payload.currentStatus || 'New Lead';
+        leadData.date = new Date().toISOString().slice(0, 10);
+      }
+
+      await setDoc(docRef, leadData, { merge: true });
+
+      const savedClientName = payload.name || payload.institutionName;
+      const savedAssociate = payload.assignedToName || (isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee')));
+      await updateGlobalClientList(savedClientName, savedAssociate);
+
+      if (editingLeadId) {
+        setAdLeads(prev => prev.map(it => it.id === editingLeadId ? { ...it, ...leadData } : it));
+      } else {
+        setAdLeads(prev => [{ ...leadData }, ...prev]);
+      }
+      
+      setIsAdLeadModalOpen(false);
+      setEditingLeadId(null);
+      setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: 'Hospital', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
+      
+      Swal.fire({
+        title: editingLeadId ? 'Updated!' : 'Added!',
+        text: editingLeadId ? 'Ad lead updated successfully.' : 'Ad lead added successfully.',
+        icon: 'success',
+        timer: 1500,
+        showConfirmButton: false
+      });
+    } catch (err) {
+      console.error("Error saving ad lead:", err);
+      Swal.fire({ title: 'Error', text: 'Failed to save ad lead', icon: 'error' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSaveDistributor = async (e) => {
+    e.preventDefault();
+    if (!companyId) return;
+
+    if (!distributorFormData.distributorName || !distributorFormData.contactNumber || !distributorFormData.state) {
+      Swal.fire({ icon: "warning", title: "Missing Fields", text: "Distributor Name, State and Contact Number are required." });
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const payload = {
+        ...distributorFormData,
+        name: distributorFormData.distributorName,
+        clientName: distributorFormData.distributorName,
+        updatedAt: new Date()
+      };
+
+      const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'distributors', 'items', editingLeadId || doc(collection(db, 'temp')).id);
+      
+      const leadData = {
+        id: docRef.id,
+        ...payload,
+        updatedAt: serverTimestamp()
+      };
+
+      if (!editingLeadId) {
+        leadData.createdAt = serverTimestamp();
+        leadData.userId = (isAdmin || isManager) ? (payload.assignedToUid || user.uid) : user.uid;
+        leadData.employeeName = isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee'));
+        leadData.addedByName = isAdmin ? 'Admin' : (isManager ? (employeeData?.name || 'Manager') : (employeeData?.name || 'Employee'));
+        leadData.newLead = true;
+        leadData.currentStatus = payload.currentStatus || 'Haven\'t yet contacted';
+        leadData.date = new Date().toISOString().slice(0, 10);
+      }
+
+      await setDoc(docRef, leadData, { merge: true });
+
+      const savedClientName = payload.distributorName;
+      const savedAssociate = payload.assignedToName || (isAdmin ? 'Admin' : (employeeData?.name || 'Employee'));
+      await updateGlobalClientList(savedClientName, savedAssociate);
+
+      if (editingLeadId) {
+        setDistributors(prev => prev.map(it => it.id === editingLeadId ? { ...it, ...leadData } : it));
+      } else {
+        setDistributors(prev => [{ ...leadData }, ...prev]);
+      }
+
+      setIsDistributorModalOpen(false);
+      setEditingLeadId(null);
+      setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+      
+      Swal.fire({
+        title: editingLeadId ? 'Updated!' : 'Added!',
+        text: editingLeadId ? 'Distributor updated successfully.' : 'Distributor added successfully.',
+        icon: 'success',
+        timer: 1500,
+        showConfirmButton: false
+      });
+    } catch (err) {
+      console.error("Error saving distributor:", err);
+      Swal.fire({ title: 'Error', text: 'Failed to save distributor', icon: 'error' });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const openEditModal = (lead, typeOverride) => {
+    const targetTab = typeOverride || activeTab;
+    if (targetTab === 'ads' || targetTab === 'Ad Lead') {
+      setAdLeadFormData({
+        name: lead.name || '',
+        institutionName: lead.institutionName || '',
+        contactNumber: lead.contactNumber || lead.contactNo || '',
+        region: lead.region || lead.place || '',
+        leadType: ['Hospital', 'Distributor', 'Physiotherapist', 'Clinic', 'Pharmacy', 'Nursing Home'].includes(lead.leadType) ? lead.leadType : 'Other',
+        customLeadType: ['Hospital', 'Distributor', 'Physiotherapist', 'Clinic', 'Pharmacy', 'Nursing Home'].includes(lead.leadType) ? '' : (lead.leadType || ''),
+        currentStatus: lead.currentStatus || 'New Lead',
+        priority: lead.priority || 'Medium',
+        remarks: lead.remarks || '',
+        followUpDate: lead.followUpDate || lead.nextFollowUp || '',
+        assignedToUid: lead.assignedToUid || '',
+        assignedToName: lead.assignedToName || '',
+        message: lead.message || ''
+      });
+      setEditingLeadId(lead.id);
+      setSelectedLead(null);
+      setIsAdLeadModalOpen(true);
+    } else if (targetTab === 'distributors' || targetTab === 'Distributor') {
+      setDistributorFormData({
+        distributorName: lead.distributorName || lead.name || lead.clientName || '',
+        state: lead.state || '',
+        region: lead.region || lead.place || '',
+        exclusive: lead.exclusive || '',
+        teamSize: lead.teamSize || '',
+        contactPersonName: lead.contactPersonName || lead.personOfContact || '',
+        contactNumber: lead.contactNumber || lead.contactNo || '',
+        email: lead.email || '',
+        address: lead.address || '',
+        gstNumber: lead.gstNumber || '',
+        establishedYear: lead.establishedYear || '',
+        currentStatus: lead.currentStatus || 'Contacted',
+        lastMeetingDate: lead.lastMeetingDate || '',
+        nextFollowUp: lead.nextFollowUp || lead.followUpDate || '',
+        productLinesHandled: lead.productLinesHandled || '',
+        territoryDescription: lead.territoryDescription || '',
+        remarks: lead.remarks || ''
+      });
+      setEditingLeadId(lead.id);
+      setSelectedLead(null);
+      setIsDistributorModalOpen(true);
+    } else {
+      setFormData({
+        date: lead.date || new Date().toISOString().split('T')[0],
+        name: lead.name || lead.clientName || '',
+      clientName: lead.clientName || lead.name || '',
+      priority: lead.priority || '',
+      place: lead.place || lead.region || '',
+      country: lead.country || '',
+      personOfContact: lead.personOfContact || '',
+      pocDesignation: lead.pocDesignation || '',
+      contactNo: lead.contactNo || '',
+      personOfContact2: lead.personOfContact2 || '',
+      contactNo2: lead.contactNo2 || '',
+      referralPerson: lead.referralPerson || '',
+      email: lead.email || '',
+      currentStatus: lead.currentStatus || 'New Lead',
+      fPrice: lead.fPrice || '',
+      lPrice: lead.lPrice || '',
+      lastContacted: lead.lastContacted || '',
+      nextFollowUp: lead.nextFollowUp || lead.followUpDate || '',
+      remarks: lead.remarks || '',
+      leadType: ['Clinic', 'Hospital', 'Physiotherapist', 'Distributor'].includes(lead.leadType) ? lead.leadType : 'Other',
+      customLeadType: ['Clinic', 'Hospital', 'Physiotherapist', 'Distributor'].includes(lead.leadType) ? '' : (lead.leadType || ''),
+      assignedToName: lead.assignedToName || '',
+      message: lead.message || ''
+    });
+    setEditingLeadId(lead.id);
+    setSelectedLead(null);
+    setIsModalOpen(true);
+    }
+  };
+
+  const handleDeleteLead = async (lead) => {
+    const result = await Swal.fire({
+      title: 'Are you sure?',
+      text: "You won't be able to revert this! This record will be permanently deleted.",
+      icon: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#ef4444',
+      cancelButtonColor: '#3f3f46',
+      confirmButtonText: 'Yes, delete it!'
+    });
+
+    if (!result.isConfirmed) return;
+
+    Swal.fire({
+      title: 'Deleting...',
+      text: 'Please wait while the record is being deleted.',
+      allowOutsideClick: false,
+      didOpen: () => {
+        Swal.showLoading();
+      }
+    });
+    
+    let collectionName = 'leads';
+    if (activeTab === 'ads') collectionName = 'adLeads';
+    if (activeTab === 'distributors') collectionName = 'distributors';
+    
+    try {
+      const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', collectionName, 'items', lead.id);
+      await deleteDoc(docRef);
+      
+      let newItems = [];
+      if (activeTab === 'regular') newItems = regularLeads.filter(item => item.id !== lead.id);
+      if (activeTab === 'ads') newItems = adLeads.filter(item => item.id !== lead.id);
+      if (activeTab === 'distributors') newItems = distributors.filter(item => item.id !== lead.id);
+        
+        const fetchedItems = getFilteredItemsForUser(newItems, collectionName);
+        
+        if (activeTab === 'regular') setRegularLeads(fetchedItems);
+        if (activeTab === 'ads') setAdLeads(fetchedItems);
+        if (activeTab === 'distributors') setDistributors(fetchedItems);
+        
+        setSelectedLead(null);
+        Swal.fire({
+          title: 'Deleted!',
+          text: 'The lead has been permanently deleted.',
+          icon: 'success',
+          timer: 1500,
+          showConfirmButton: false
+        });
+    } catch (err) {
+      console.error("Error deleting lead:", err);
+      Swal.fire({
+        title: 'Error!',
+        text: 'Failed to delete the lead.',
+        icon: 'error'
+      });
+    }
+  };
+
+  const handleConvertToAdLead = async (lead) => {
+    const result = await Swal.fire({
+      title: 'Convert to Ad Lead?',
+      text: "This will move the current record to Ad Leads.",
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonColor: '#000000',
+      cancelButtonColor: '#3f3f46',
+      confirmButtonText: 'Yes, Convert'
+    });
+
+    if (!result.isConfirmed) return;
+
+    Swal.fire({
+      title: 'Converting...',
+      text: 'Please wait while the lead is being converted.',
+      allowOutsideClick: false,
+      didOpen: () => {
+        Swal.showLoading();
+      }
+    });
+    
+    try {
+      const sourceCollection = activeTab === 'regular' ? 'leads' : 'distributors';
+      
+      // 1. Delete from source collection
+      const sourceDocRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', sourceCollection, 'items', lead.id);
+      await deleteDoc(sourceDocRef);
+      
+      if (activeTab === 'regular') setRegularLeads(prev => prev.filter(item => item.id !== lead.id));
+      if (activeTab === 'distributors') setDistributors(prev => prev.filter(item => item.id !== lead.id));
+      
+      // 2. Add to adLeads collection
+      const adLeadsDocRef = doc(collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'adLeads', 'items'));
+      
+      const newAdLead = {
+        id: adLeadsDocRef.id,
+        name: activeTab === 'regular' ? (lead.personOfContact || lead.clientName || lead.name || '') : (lead.contactPersonName || lead.distributorName || ''),
+        institutionName: activeTab === 'regular' ? (lead.clientName || lead.name || '') : (lead.distributorName || ''),
+        contactNumber: lead.contactNo || lead.contactNumber || '',
+        contactNo: lead.contactNo || lead.contactNumber || '', 
+        region: lead.place || lead.region || lead.state || '',
+        leadType: lead.leadType || (activeTab === 'distributors' ? 'Distributor' : 'Other'),
+        priority: lead.priority || 'Medium',
+        remarks: lead.remarks || '',
+        followUpDate: lead.nextFollowUp || lead.followUpDate || lead.lastMeetingDate || '',
+        assignedToUid: lead.assignedToUid || lead.userId || user.uid,
+        assignedToName: lead.assignedToName || lead.employeeName || employeeData?.name || '',
+        message: lead.message || 'Converted from ' + (activeTab === 'regular' ? 'Regular Lead' : 'Distributor'),
+        updatedAt: serverTimestamp(),
+        currentStatus: lead.currentStatus || 'New Lead',
+        newLead: true,
+        employeeName: lead.employeeName || employeeData?.name || '',
+        addedByName: lead.addedByName || employeeData?.name || '',
+        userId: lead.userId || user.uid,
+        date: new Date().toISOString().slice(0, 10),
+        createdAt: serverTimestamp(),
+      };
+      
+      await setDoc(adLeadsDocRef, newAdLead, { merge: true });
+      
+      setAdLeads(prev => [{ ...newAdLead }, ...prev]);
+      
+      setSelectedLead(null);
+      setQuickUpdateLead(null);
+      Swal.fire({
+        title: 'Converted!',
+        text: 'The lead has been successfully moved to Ad Leads.',
+        icon: 'success',
+        timer: 1500,
+        showConfirmButton: false
+      });
+    } catch (err) {
+      console.error("Error converting lead:", err);
+      Swal.fire({
+        title: 'Error!',
+        text: 'Failed to convert the lead.',
+        icon: 'error'
+      });
+    }
+  };
+  const handleConvertToRegularLead = async (lead) => {
+    const result = await Swal.fire({
+      title: 'Transfer to Regular Lead?',
+      text: "This will move the current record to Regular Leads.",
+      icon: 'question',
+      showCancelButton: true,
+      confirmButtonColor: '#000000',
+      cancelButtonColor: '#3f3f46',
+      confirmButtonText: 'Yes, Transfer'
+    });
+
+    if (!result.isConfirmed) return;
+
+    Swal.fire({
+      title: 'Transferring...',
+      text: 'Please wait while the lead is being transferred.',
+      allowOutsideClick: false,
+      didOpen: () => {
+        Swal.showLoading();
+      }
+    });
+    
+    try {
+      const sourceDocRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'adLeads', 'items', lead.id);
+      await deleteDoc(sourceDocRef);
+      
+      setAdLeads(prev => prev.filter(item => item.id !== lead.id));
+      
+      const leadsDocRef = doc(collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'leads', 'items'));
+      
+      const newRegularLead = {
+        id: leadsDocRef.id,
+        name: lead.institutionName || lead.name || '',
+        clientName: lead.institutionName || lead.name || '',
+        personOfContact: lead.name || '',
+        contactNo: lead.contactNumber || lead.contactNo || '',
+        place: lead.region || '',
+        region: lead.region || '',
+        country: lead.country || '',
+        leadType: lead.leadType || 'Other',
+        priority: lead.priority || 'Medium',
+        remarks: lead.remarks || '',
+        nextFollowUp: lead.followUpDate || lead.nextFollowUp || '',
+        assignedToUid: lead.assignedToUid || lead.userId || user?.uid || '',
+        assignedToName: lead.assignedToName || lead.employeeName || employeeData?.name || '',
+        message: lead.message || 'Transferred from Ad Lead',
+        updatedAt: serverTimestamp(),
+        currentStatus: lead.currentStatus || 'New Lead',
+        newLead: true,
+        employeeName: lead.employeeName || employeeData?.name || '',
+        addedByName: lead.addedByName || employeeData?.name || '',
+        userId: lead.userId || user?.uid || '',
+        date: new Date().toISOString().slice(0, 10),
+        createdAt: serverTimestamp(),
+      };
+      
+      await setDoc(leadsDocRef, newRegularLead, { merge: true });
+      
+      setRegularLeads(prev => [{ ...newRegularLead }, ...prev]);
+      
+      setSelectedLead(null);
+      setQuickUpdateLead(null);
+      Swal.fire({
+        title: 'Transferred!',
+        text: 'The lead has been successfully moved to Regular Leads.',
+        icon: 'success',
+        timer: 1500,
+        showConfirmButton: false
+      });
+    } catch (err) {
+      console.error("Error transferring lead:", err);
+      Swal.fire({
+        title: 'Error!',
+        text: 'Failed to transfer the lead.',
+        icon: 'error'
+      });
+    }
+  };
+
+  const handleConvertToActiveDistributor = async (e) => {
+    e.preventDefault();
+    if (!companyId || !convertingDistributorId) return;
+
+    const lead = distributors.find(d => d.id === convertingDistributorId);
+    if (!lead) return;
+
+    setIsSubmitting(true);
+    
+    try {
+      const activeDistributorsDocRef = doc(collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'activeDistributors', 'items'));
+      
+      const newActiveDistributor = {
+        ...lead,
+        id: activeDistributorsDocRef.id,
+        isActiveDistributor: true,
+        agreementDate: activeDistributorFormData.agreementDate,
+        agreementDurationMonths: activeDistributorFormData.agreementDurationMonths,
+        territoryExclusivity: activeDistributorFormData.territoryExclusivity,
+        minimumTarget: activeDistributorFormData.minimumTarget,
+        distributorPrice: activeDistributorFormData.distributorPrice,
+        agreementRemarks: activeDistributorFormData.remarks,
+        currentStatus: 'Active Distributor',
+        convertedAt: serverTimestamp(),
+        convertedByUid: user?.uid,
+        convertedByName: employeeData?.name || 'Admin',
+      };
+      
+      await setDoc(activeDistributorsDocRef, newActiveDistributor, { merge: true });
+      
+      const sourceDocRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'distributors', 'items', lead.id);
+      await updateDoc(sourceDocRef, {
+        isActiveDistributor: true,
+        currentStatus: 'Active Distributor',
+        convertedToActiveId: activeDistributorsDocRef.id
+      });
+      
+      setDistributors(prev => prev.map(item => item.id === lead.id ? { ...item, isActiveDistributor: true, currentStatus: 'Active Distributor' } : item));
+      
+      setIsActiveDistributorModalOpen(false);
+      setConvertingDistributorId(null);
+      
+      Swal.fire({
+        title: 'Promoted!',
+        text: 'Distributor is now an Active Distributor.',
+        icon: 'success',
+        timer: 1500,
+        showConfirmButton: false
+      });
+    } catch (err) {
+      console.error("Error converting distributor:", err);
+      Swal.fire({
+        title: 'Error!',
+        text: 'Failed to promote the distributor.',
+        icon: 'error'
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+
+
+  const handleTransferLead = async (e) => {
+    e.preventDefault();
+    if (!companyId || !quickUpdateLead || !transferTargetEmployee) return;
+    setIsSubmitting(true);
+    
+    let collectionName = 'leads';
+    if (activeTab === 'ads') collectionName = 'adLeads';
+    if (activeTab === 'distributors') collectionName = 'distributors';
+
+    try {
+      const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', collectionName, 'items', quickUpdateLead.id);
+      
+      const updatedData = {
+        assignedToUid: transferTargetEmployee.uid,
+        assignedToName: transferTargetEmployee.name,
+        transferredFromUid: user?.uid || 'Unknown UID',
+        transferredFromName: user?.name || 'Unknown User',
+        updatedAt: serverTimestamp()
+      };
+      
+      await updateDoc(docRef, updatedData);
+      
+      // Update local state
+      const updateLocalState = (itemsList) => itemsList.map(it => it.id === quickUpdateLead.id ? { ...it, ...updatedData } : it);
+      if (activeTab === 'regular') setRegularLeads(prev => updateLocalState(prev));
+      if (activeTab === 'ads') setAdLeads(prev => updateLocalState(prev));
+      if (activeTab === 'distributors') setDistributors(prev => updateLocalState(prev));
+      
+      setIsTransferModalOpen(false);
+      setTransferTargetEmployee(null);
+      setQuickUpdateLead(null);
+      
+    } catch (err) {
+      console.error("Error transferring lead:", err);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    setCurrentPage(1);
+    setSearchQuery('');
+    setStatusFilter('');
+    setEmployeeFilter('');
+    setMonthFilter('');
+    setLeadTypeFilter('');
+    setShowMissedFollowUpsOnly(false);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const fetchCRMData = async () => {
+      if (!companyId) return;
+      
+      if (crmCache.data && crmCache.activeSegment === activeSegment && Date.now() - crmCache.timestamp < 5 * 60 * 1000) {
+        const c = crmCache.data;
+        setAdCampaignsList(c.campaigns);
+        setGlobalClients(c.globalClients);
+        setSegmentClients(c.segmentClients);
+        setAllEmployees(c.allEmployees);
+        setAllGlobalClients(c.allGlobalClients);
+        
+        setRegularLeads(getFilteredItemsForUser(c.fetchedLeads, 'leads'));
+        setAdLeads(getFilteredItemsForUser(c.fetchedAdLeads, 'adLeads'));
+        setDistributors(getFilteredItemsForUser(c.fetchedDistributors, 'distributors'));
+        
+        setLoading(false);
+        return;
+      }
+      
+      try {
+        const leadsColRef = collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'leads', 'items');
+        const adLeadsColRef = collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'adLeads', 'items');
+        const distributorsColRef = collection(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'distributors', 'items');
+        const empsColRef = collection(db, 'userData', companyId, 'employees');
+        const segmentDocRef = doc(db, 'userData', companyId, 'segments', activeSegment);
+        const globalClientsDocRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', 'allClients');
+        const campaignsRef = collection(db, 'userData', companyId, 'adCampaigns');
+        
+        const [leadsSnap, adLeadsSnap, distributorsSnap, empsSnap, segmentSnap, globalClientsSnap, campaignsSnap] = await Promise.all([
+          getDocs(leadsColRef),
+          getDocs(adLeadsColRef),
+          getDocs(distributorsColRef),
+          getDocs(empsColRef),
+          getDoc(segmentDocRef),
+          getDoc(globalClientsDocRef),
+          getDocs(campaignsRef)
+        ]);
+        
+        const fetchedCampaigns = campaignsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        const globClients = globalClientsSnap.exists() ? globalClientsSnap.data().clients || [] : [];
+        const segClients = segmentSnap.exists() ? segmentSnap.data().clients || [] : [];
+        const empsList = empsSnap.docs.map(doc => ({ id: doc.id, uid: doc.id, ...doc.data() }));
+
+        let fetchedLeads = leadsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        let fetchedAdLeads = adLeadsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+        let fetchedDistributors = distributorsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+        const allGlobal = [
+          ...fetchedLeads.map(l => ({...l, _sourceCollection: 'Regular Lead'})),
+          ...fetchedAdLeads.map(l => ({...l, _sourceCollection: 'Ad Lead'})),
+          ...fetchedDistributors.map(l => ({...l, _sourceCollection: 'Distributor'}))
+        ];
+        
+        crmCache.data = {
+          campaigns: fetchedCampaigns,
+          globalClients: globClients,
+          segmentClients: segClients,
+          allEmployees: empsList,
+          fetchedLeads,
+          fetchedAdLeads,
+          fetchedDistributors,
+          allGlobalClients: allGlobal
+        };
+        crmCache.timestamp = Date.now();
+        crmCache.activeSegment = activeSegment;
+
+        setAdCampaignsList(fetchedCampaigns);
+        setGlobalClients(globClients);
+        setSegmentClients(segClients);
+        setAllEmployees(empsList);
+        setAllGlobalClients(allGlobal);
+
+        setRegularLeads(getFilteredItemsForUser(fetchedLeads, 'leads'));
+        setAdLeads(getFilteredItemsForUser(fetchedAdLeads, 'adLeads'));
+        setDistributors(getFilteredItemsForUser(fetchedDistributors, 'distributors'));
+        
+      } catch (error) {
+        console.error("Error fetching CRM data:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchCRMData();
+  }, [companyId, isAdmin, user?.uid, activeSegment]);
+
+  // Handle cross-page navigation state
+  useEffect(() => {
+    if (location.state?.openQuickUpdateLead) {
+      const lead = location.state.openQuickUpdateLead;
+      setQuickUpdateLead(lead);
+      setUpdateStatus(lead.currentStatus || 'New Lead');
+      setUpdateRemarks('');
+      navigate('.', { replace: true, state: {} });
+    }
+  }, [location.state, navigate]);
+
+  // Global follow-ups fetch across all segments
+  useEffect(() => {
+    if (!companyId) return;
+    const fetchGlobalFollowUps = async () => {
+      try {
+        const segments = ['happymoves', 'gamefaktory'];
+        const collections = ['leads', 'adLeads', 'distributors'];
+        const todayStr = new Date().toISOString().split('T')[0];
+        const allFollowUps = [];
+
+        for (const seg of segments) {
+          for (const col of collections) {
+            const colRef = collection(db, 'userData', companyId, 'segments', seg, 'crmData', col, 'items');
+            const snap = await getDocs(colRef);
+            snap.forEach(docSnap => {
+              const data = docSnap.data();
+              const followUp = data.nextFollowUp || data.followUpDate;
+              if (followUp === todayStr) {
+                const sourceName = col === 'leads' ? 'Regular Lead' : col === 'adLeads' ? 'Ad Lead' : 'Distributor';
+                allFollowUps.push({
+                  id: docSnap.id,
+                  ...data,
+                  _sourceCollection: sourceName,
+                  _segmentName: seg === 'happymoves' ? 'Happy Moves' : 'Game Faktory',
+                  _sourceTab: col === 'leads' ? 'regular' : col === 'adLeads' ? 'ads' : 'distributors'
+                });
+              }
+            });
+          }
+        }
+
+        const filteredFollowUps = allFollowUps.filter(item => {
+          if (isAdmin || isManager) return true;
+          if (item._sourceTab === 'ads' && canManageAdLeads) return true;
+          return item.userId === user?.uid || item.assignedToUid === user?.uid;
+        });
+
+        setTodaysGlobalFollowUps(filteredFollowUps);
+      } catch (err) {
+        console.error("Error fetching global follow ups:", err);
+      }
+    };
+    fetchGlobalFollowUps();
+  }, [companyId, isAdmin, isManager, canManageAdLeads, user?.uid]);
+
+  const getSimilarClients = (query) => {
+    if (!query || query.trim().length < 2) {
+      setSimilarClients([]);
+      return;
+    }
+    const lowerQuery = query.toLowerCase();
+    const matches = allGlobalClients.filter(client => {
+      return (
+        (client.clientName && client.clientName.toLowerCase().includes(lowerQuery)) ||
+        (client.name && client.name.toLowerCase().includes(lowerQuery)) ||
+        (client.institutionName && client.institutionName.toLowerCase().includes(lowerQuery)) ||
+        (client.distributorName && client.distributorName.toLowerCase().includes(lowerQuery)) ||
+        (client.contactNo && client.contactNo.includes(lowerQuery)) ||
+        (client.contactNumber && client.contactNumber.includes(lowerQuery)) ||
+        (client.phone && client.phone.includes(lowerQuery))
+      );
+    });
+    setSimilarClients(matches.slice(0, 10)); // limit to 10
+  };
+
+  const getIconForKey = (key) => {
+    const k = key.toLowerCase();
+    if (k.includes('name') || k.includes('client') || k.includes('institution')) return <Building2 className="w-4 h-4" />;
+    if (k.includes('contact') || k.includes('person')) return <User className="w-4 h-4" />;
+    if (k.includes('phone') || k.includes('number') || k.includes('contactno')) return <Phone className="w-4 h-4" />;
+    if (k.includes('email')) return <Mail className="w-4 h-4" />;
+    if (k.includes('place') || k.includes('country') || k.includes('region') || k.includes('address') || k.includes('state')) return <MapPin className="w-4 h-4" />;
+    if (k.includes('price') || k.includes('value')) return <DollarSign className="w-4 h-4" />;
+    if (k.includes('date') || k.includes('followup') || k.includes('time')) return <Calendar className="w-4 h-4" />;
+    if (k.includes('status')) return <CheckCircle className="w-4 h-4" />;
+    if (k.includes('priority')) return <AlertCircle className="w-4 h-4" />;
+    if (k.includes('designation') || k.includes('role')) return <Briefcase className="w-4 h-4" />;
+    if (k.includes('remarks') || k.includes('message')) return <MessageSquare className="w-4 h-4" />;
+    if (k.includes('type')) return <Tag className="w-4 h-4" />;
+    if (k.includes('id')) return <Hash className="w-4 h-4" />;
+    return <FileText className="w-4 h-4" />;
+  };
+
+  const getStatusColor = (status) => {
+    if (!status) return 'bg-zinc-50 text-zinc-600 ring-zinc-500/10 border-zinc-200';
+    const s = status.toLowerCase();
+    
+    // Regular Leads & Ad Leads
+    if (s === 'new lead') return 'bg-sky-50 text-sky-700 ring-sky-600/20 border-sky-200';
+    if (s === 'contacted') return 'bg-blue-50 text-blue-700 ring-blue-600/20 border-blue-200';
+    if (s === 'connected via whatsapp') return 'bg-teal-50 text-teal-700 ring-teal-600/20 border-teal-200';
+    if (s === 'interested') return 'bg-indigo-50 text-indigo-700 ring-indigo-600/20 border-indigo-200';
+    if (s === 'follow up needed' || s === 'follow-up needed') return 'bg-amber-50 text-amber-700 ring-amber-600/20 border-amber-200';
+    if (s === 'quotation sent') return 'bg-orange-50 text-orange-700 ring-orange-600/20 border-orange-200';
+    if (s === 'awaiting decision') return 'bg-yellow-50 text-yellow-700 ring-yellow-600/20 border-yellow-200';
+    if (s === 'token recieved' || s === 'token received') return 'bg-lime-50 text-lime-700 ring-lime-600/20 border-lime-200';
+    if (s === 'deal closed' || s === 'converted (deal won)' || s === 'converted') return 'bg-emerald-50 text-emerald-700 ring-emerald-600/20 border-emerald-200';
+    if (s === 'deal lost' || s === 'not interested (deal lost)') return 'bg-red-50 text-red-700 ring-red-600/20 border-red-200';
+
+    // Distributors
+    if (s === "haven't yet contacted") return 'bg-slate-50 text-slate-700 ring-slate-600/20 border-slate-200';
+    if (s === 'called, no response') return 'bg-rose-50 text-rose-700 ring-rose-600/20 border-rose-200';
+    if (s === 'contacted and discussed via phone') return 'bg-cyan-50 text-cyan-700 ring-cyan-600/20 border-cyan-200';
+    if (s === 'online demo done') return 'bg-violet-50 text-violet-700 ring-violet-600/20 border-violet-200';
+    if (s === 'live demo done') return 'bg-fuchsia-50 text-fuchsia-700 ring-fuchsia-600/20 border-fuchsia-200';
+    if (s === 'hospital presentation done') return 'bg-purple-50 text-purple-700 ring-purple-600/20 border-purple-200';
+    if (s === 'agreement sent & waiting' || s === 'agreement sent & awaiting response') return 'bg-amber-100 text-amber-800 ring-amber-600/20 border-amber-300';
+    if (s === 'agreement signed') return 'bg-teal-50 text-teal-700 ring-teal-600/20 border-teal-200';
+    if (s === 'purchased demo piece') return 'bg-green-50 text-green-700 ring-green-600/20 border-green-200';
+    if (s === 'doing sales') return 'bg-emerald-100 text-emerald-800 ring-emerald-600/30 border-emerald-300';
+    if (s === 'inactive') return 'bg-stone-100 text-stone-600 ring-stone-500/20 border-stone-200';
+    if (s === 'terminated') return 'bg-red-100 text-red-800 ring-red-600/30 border-red-300';
+    
+    // Fallbacks
+    if (s.includes('lost') || s.includes('fail') || s.includes('cancel')) return 'bg-red-50 text-red-700 ring-red-600/20 border-red-200';
+    if (s.includes('won') || s.includes('success') || s.includes('converted')) return 'bg-emerald-50 text-emerald-700 ring-emerald-600/20 border-emerald-200';
+    if (s.includes('progress') || s.includes('contacted') || s.includes('discuss')) return 'bg-blue-50 text-blue-700 ring-blue-600/20 border-blue-200';
+    
+    return 'bg-zinc-50 text-zinc-700 ring-zinc-600/20 border-zinc-200';
+  };
+
+  const getPriorityColor = (priority) => {
+    if (priority === 'Urgent' || priority === 'High') return 'text-red-600 flex items-center gap-1 bg-red-50 px-2 py-0.5 rounded-md text-[11px] font-semibold';
+    if (priority === 'Medium') return 'text-orange-600 flex items-center gap-1 bg-orange-50 px-2 py-0.5 rounded-md text-[11px] font-semibold';
+    if (priority === 'Low') return 'text-green-600 flex items-center gap-1 bg-green-50 px-2 py-0.5 rounded-md text-[11px] font-semibold';
+    return 'text-zinc-600 flex items-center gap-1 bg-zinc-50 px-2 py-0.5 rounded-md text-[11px] font-semibold';
+  };
+
+  const currentData = activeTab === 'regular' ? regularLeads : activeTab === 'ads' ? adLeads : distributors;
+
+  const uniqueStatuses = [...new Set(currentData.map(item => item.currentStatus || 'N/A'))].filter(Boolean).sort();
+  const uniqueEmployees = [...new Set(
+    currentData.flatMap(item => {
+      const names = [];
+      if (item.employeeName) names.push(item.employeeName);
+      if (item.assignedToName) names.push(item.assignedToName);
+      if (item.addedByName) names.push(item.addedByName);
+      if (names.length === 0) names.push('N/A');
+      return names;
+    })
+  )].filter(Boolean).sort();
+  const uniqueMonths = [...new Set(currentData.map(item => {
+    if (!item.date && !item.createdAt) return 'N/A';
+    const itemDate = new Date(item.date || (item.createdAt?.seconds ? item.createdAt.seconds * 1000 : item.createdAt));
+    if (isNaN(itemDate)) return 'N/A';
+    return itemDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+  }))].filter(m => m !== 'N/A').sort((a, b) => new Date(b) - new Date(a));
+
+  const uniqueLeadTypes = [...new Set(currentData.map(item => item.leadType || 'N/A'))].filter(Boolean).sort();
+
+  const isIrregularPhone = (phone) => {
+    if (!phone) return true;
+    const digitsOnly = phone.toString().replace(/\D/g, '');
+    if (digitsOnly.length < 7) return true;
+    if (/^(\d)\1+$/.test(digitsOnly)) return true;
+    if ('01234567890123456789'.includes(digitsOnly) || '98765432109876543210'.includes(digitsOnly)) return true;
+    return false;
+  };
+
+  const isMissedFollowUp = (item) => {
+    const s = (item.currentStatus || '').toLowerCase();
+    const closedStatuses = ['closed', 'lost', 'won', 'signed', 'terminated', 'inactive', 'doing sales', 'purchased', 'converted'];
+    if (closedStatuses.some(st => s.includes(st))) return false;
+
+    const followUpStr = item.nextFollowUp || item.followUpDate;
+    if (!followUpStr) return false;
+    
+    const followUpDate = new Date(followUpStr);
+    if (isNaN(followUpDate)) return false;
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    return followUpDate < today;
+  };
+
+  const isRecentLead = (item) => {
+    if (!item) return false;
+    let itemDate = null;
+    const rawDate = item.date || item.createdAt || item.addedDate;
+    if (rawDate) {
+      if (rawDate.seconds) {
+        itemDate = new Date(rawDate.seconds * 1000);
+      } else if (typeof rawDate === 'string' || typeof rawDate === 'number' || rawDate instanceof Date) {
+        itemDate = new Date(rawDate);
+      }
+    }
+    if (!itemDate || isNaN(itemDate.getTime())) return false;
+
+    const today = new Date();
+    today.setHours(23, 59, 59, 999);
+    
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    threeDaysAgo.setHours(0, 0, 0, 0);
+
+    return itemDate >= threeDaysAgo && itemDate <= today;
+  };
+
+  const getContactTouchpoints = (item) => {
+    if (!item) return 0;
+    let count = 0;
+
+    // 1. Status history entries (from QuickUpdateModal or status changes)
+    if (Array.isArray(item.statusHistory) && item.statusHistory.length > 0) {
+      count = Math.max(count, item.statusHistory.length);
+    }
+
+    // 2. Dated bracket logs in remarks (e.g. [Sep 22], [Oct 14])
+    if (typeof item.remarks === 'string' && item.remarks.trim()) {
+      const bracketMatches = item.remarks.match(/\[[A-Za-z]{3,}\s+\d{1,2}\]/g);
+      if (bracketMatches && bracketMatches.length > 0) {
+        // Each bracket tag corresponds to a distinct dated followup log, plus initial contact
+        count = Math.max(count, bracketMatches.length + 1);
+      } else {
+        const lines = item.remarks.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        if (lines.length > 1) {
+          count = Math.max(count, lines.length);
+        }
+      }
+    }
+
+    // 3. Fallback: if lead has different added date and last contacted date
+    if (count <= 1 && item.lastContacted && (item.date || item.createdAt)) {
+      const createdStr = item.date || (item.createdAt?.seconds ? new Date(item.createdAt.seconds * 1000).toISOString().split('T')[0] : '');
+      if (createdStr && item.lastContacted !== createdStr) {
+        count = Math.max(count, 2);
+      }
+    }
+
+    return count;
+  };
+
+  // Rule: Frequently contacted if 3 or more logged interaction touchpoints (initial outreach + 2+ follow-up notes/status updates)
+  const isFrequentlyContacted = (item) => {
+    return getContactTouchpoints(item) >= 3;
+  };
+
+  const getAddedTime = (item) => {
+    if (!item) return 0;
+    if (item.createdAt) {
+      if (typeof item.createdAt.seconds === 'number') return item.createdAt.seconds * 1000;
+      if (typeof item.createdAt === 'string' || typeof item.createdAt === 'number') {
+        const t = new Date(item.createdAt).getTime();
+        if (!isNaN(t)) return t;
+      }
+    }
+    if (item.date) {
+      const t = new Date(item.date).getTime();
+      if (!isNaN(t)) return t;
+    }
+    if (item.addedDate) {
+      const t = new Date(item.addedDate).getTime();
+      if (!isNaN(t)) return t;
+    }
+    return 0;
+  };
+
+  const getUpdatedTime = (item) => {
+    if (!item) return 0;
+    if (item.updatedAt) {
+      if (typeof item.updatedAt.seconds === 'number') return item.updatedAt.seconds * 1000;
+      if (typeof item.updatedAt === 'string' || typeof item.updatedAt === 'number') {
+        const t = new Date(item.updatedAt).getTime();
+        if (!isNaN(t)) return t;
+      }
+    }
+    if (Array.isArray(item.statusHistory) && item.statusHistory.length > 0) {
+      const lastEntry = item.statusHistory[item.statusHistory.length - 1];
+      if (lastEntry) {
+        if (lastEntry.date) {
+          const t = new Date(lastEntry.date).getTime();
+          if (!isNaN(t)) return t;
+        }
+        if (lastEntry.timestamp) {
+          const t = typeof lastEntry.timestamp.seconds === 'number'
+            ? lastEntry.timestamp.seconds * 1000 
+            : new Date(lastEntry.timestamp).getTime();
+          if (!isNaN(t)) return t;
+        }
+      }
+    }
+    const otherDate = item.lastFollowedUp || item.lastContacted || item.lastMeetingDate;
+    if (otherDate) {
+      const t = new Date(otherDate).getTime();
+      if (!isNaN(t)) return t;
+    }
+    return getAddedTime(item);
+  };
+
+  const getFollowUpTime = (item) => {
+    if (!item) return null;
+    const raw = item.nextFollowUp || item.followUpDate || item.followUp;
+    if (!raw || (typeof raw === 'string' && raw.trim() === '')) return null;
+    if (typeof raw.seconds === 'number') return raw.seconds * 1000;
+    if (typeof raw === 'string' || typeof raw === 'number' || raw instanceof Date) {
+      const t = new Date(raw).getTime();
+      return isNaN(t) ? null : t;
+    }
+    return null;
+  };
+
+  const getFilteredData = (data, ignoreStatus = false) => {
+    const lowerQuery = searchQuery.toLowerCase();
+    const filtered = data.filter(item => {
+      const status = item.currentStatus || 'N/A';
+      if (!ignoreStatus && statusFilter !== '' && status !== statusFilter) return false;
+      
+      if (employeeFilter !== '') {
+        const matchesEmployee = (item.employeeName === employeeFilter) || 
+                                (item.assignedToName === employeeFilter) || 
+                                (item.addedByName === employeeFilter) || 
+                                (employeeFilter === 'N/A' && !item.employeeName && !item.assignedToName && !item.addedByName);
+        if (!matchesEmployee) return false;
+      }
+      
+      const phone = item.contactNo || item.contactNumber || '';
+      if (showIrregularPhonesOnly && !isIrregularPhone(phone)) return false;
+      
+      if (showMissedFollowUpsOnly && !isMissedFollowUp(item)) return false;
+
+      if (showFrequentlyContactedOnly && !isFrequentlyContacted(item)) return false;
+
+      const leadType = item.leadType || 'N/A';
+      if (leadTypeFilter !== '' && leadType !== leadTypeFilter) return false;
+
+      if (priorityFilter !== 'All') {
+        const priority = item.priority || 'Medium';
+        if (priority !== priorityFilter) return false;
+      }
+
+      if (exactDateFilter !== '') {
+        let itemDateObj;
+        if (exactDateFilterType === 'added') {
+          itemDateObj = new Date(item.date || (item.createdAt?.seconds ? item.createdAt.seconds * 1000 : item.createdAt));
+        } else {
+          itemDateObj = new Date(item.updatedAt?.seconds ? item.updatedAt.seconds * 1000 : item.updatedAt || item.date || (item.createdAt?.seconds ? item.createdAt.seconds * 1000 : item.createdAt));
+        }
+        
+        if (!isNaN(itemDateObj)) {
+          const year = itemDateObj.getFullYear();
+          const month = String(itemDateObj.getMonth() + 1).padStart(2, '0');
+          const day = String(itemDateObj.getDate()).padStart(2, '0');
+          const itemDateStr = `${year}-${month}-${day}`;
+          if (itemDateStr !== exactDateFilter) return false;
+        } else {
+          return false;
+        }
+      }
+
+      if (monthFilter !== '') {
+        const itemDate = new Date(item.date || (item.createdAt?.seconds ? item.createdAt.seconds * 1000 : item.createdAt));
+        const monthStr = isNaN(itemDate) ? 'N/A' : itemDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+        if (monthStr !== monthFilter) return false;
+      }
+      
+      if (lowerQuery !== '') {
+        const searchString = Object.values(item).filter(v => typeof v !== 'object' && v !== null && v !== undefined).join(' ').toLowerCase();
+        const strippedQuery = lowerQuery.replace(/\s+/g, '');
+        const strippedSearchString = searchString.replace(/\s+/g, '');
+        
+        if (!searchString.includes(lowerQuery) && !strippedSearchString.includes(strippedQuery)) return false;
+      }
+      
+      return true;
+    });
+
+    if (sortBy === 'added-desc') {
+      return [...filtered].sort((a, b) => getAddedTime(b) - getAddedTime(a));
+    } else if (sortBy === 'added-asc') {
+      return [...filtered].sort((a, b) => getAddedTime(a) - getAddedTime(b));
+    } else if (sortBy === 'updated-desc') {
+      return [...filtered].sort((a, b) => getUpdatedTime(b) - getUpdatedTime(a));
+    } else if (sortBy === 'updated-asc') {
+      return [...filtered].sort((a, b) => getUpdatedTime(a) - getUpdatedTime(b));
+    } else if (sortBy === 'followup-asc') {
+      return [...filtered].sort((a, b) => {
+        const timeA = getFollowUpTime(a);
+        const timeB = getFollowUpTime(b);
+        if (timeA !== null && timeB === null) return -1;
+        if (timeA === null && timeB !== null) return 1;
+        if (timeA !== null && timeB !== null) return timeA - timeB;
+        return getAddedTime(b) - getAddedTime(a);
+      });
+    } else if (sortBy === 'followup-desc') {
+      return [...filtered].sort((a, b) => {
+        const timeA = getFollowUpTime(a);
+        const timeB = getFollowUpTime(b);
+        if (timeA !== null && timeB === null) return -1;
+        if (timeA === null && timeB !== null) return 1;
+        if (timeA !== null && timeB !== null) return timeB - timeA;
+        return getAddedTime(b) - getAddedTime(a);
+      });
+    } else if (sortBy === 'touchpoints-desc') {
+      return [...filtered].sort((a, b) => {
+        const touchA = getContactTouchpoints(a);
+        const touchB = getContactTouchpoints(b);
+        if (touchB !== touchA) return touchB - touchA;
+        return getUpdatedTime(b) - getUpdatedTime(a);
+      });
+    }
+
+    return filtered;
+  };
+
+  const dataFilteredByOtherThanStatus = getFilteredData(currentData, true);
+  
+  const statusCounts = {};
+  dataFilteredByOtherThanStatus.forEach(item => {
+    const status = item.currentStatus || 'N/A';
+    statusCounts[status] = (statusCounts[status] || 0) + 1;
+  });
+
+  const filteredRegularLeads = getFilteredData(regularLeads);
+  const filteredAdLeads = getFilteredData(adLeads);
+  const filteredDistributors = getFilteredData(distributors);
+
+  const RenderSimilarClients = ({ fieldName }) => {
+    if (showSimilarClientsFor !== fieldName || similarClients.length === 0) return null;
+    return (
+      <div className="mt-1 bg-white border border-rose-200 rounded-md shadow-sm p-2 z-50">
+        <p className="text-xs font-semibold text-rose-600 mb-1">Similar Entries Found:</p>
+        <ul className="max-h-32 overflow-y-auto space-y-1">
+          {similarClients.map((c, idx) => (
+            <li key={idx} className="text-xs text-zinc-700 p-1 bg-rose-50 rounded">
+              <span className="font-medium">[{c._sourceCollection}]</span> {c.clientName || c.name || c.distributorName} 
+              {c.phone || c.contactNo || c.contactNumber ? ` - ${c.phone || c.contactNo || c.contactNumber}` : ''} 
+              <span className="text-zinc-500 ml-1">(Added by: {c.assignedToName || 'Unknown'})</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+  return (
+    <div className="flex flex-col h-full">
+      <header className="mb-8 flex flex-col md:flex-row md:items-end justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-1 mb-6 bg-zinc-100/80 p-1 rounded-xl border border-zinc-200/80 w-fit shadow-inner">
+            <button 
+              onClick={() => setActiveSegment('happymoves')}
+              className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[13px] font-bold transition-all duration-300 ${activeSegment === 'happymoves' ? 'bg-white text-black shadow-[0_2px_10px_rgba(0,0,0,0.06)]' : 'text-zinc-500 hover:text-zinc-800'}`}
+            >
+              <div className={`w-2 h-2 rounded-full ${activeSegment === 'happymoves' ? 'bg-emerald-500' : 'bg-transparent'}`} />
+              Happy Moves
+            </button>
+            <button 
+              onClick={() => setActiveSegment('gamefaktory')}
+              className={`flex items-center gap-2 px-5 py-2 rounded-lg text-[13px] font-bold transition-all duration-300 ${activeSegment === 'gamefaktory' ? 'bg-white text-black shadow-[0_2px_10px_rgba(0,0,0,0.06)]' : 'text-zinc-500 hover:text-zinc-800'}`}
+            >
+              <div className={`w-2 h-2 rounded-full ${activeSegment === 'gamefaktory' ? 'bg-blue-500' : 'bg-transparent'}`} />
+              Game Faktory
+            </button>
+          </div>
+          <h1 className="text-3xl font-semibold text-black tracking-tight">CRM Pipeline</h1>
+          <p className="text-[15px] text-zinc-500 mt-1.5">Manage your leads, ad campaigns, and distributors.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {activeTab === 'ads' && (isAdmin || isManager || canManageAdLeads) && (
+            <button 
+              onClick={() => {
+                setBulkAdLeadText('');
+                setBulkAdLeadAssignedToUid('');
+                setBulkAdLeadAssignedToName('');
+                setBulkAdLeadCampaign('');
+                setIsBulkAdLeadModalOpen(true);
+              }}
+              className="bg-white hover:bg-zinc-50 text-black px-4 py-2 rounded-lg font-medium text-[13px] transition-all border border-zinc-200 shadow-sm flex items-center gap-2"
+            >
+              Bulk Assign
+            </button>
+          )}
+          <button 
+            onClick={() => navigate('/active-distributors')}
+            className="bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-4 py-2 rounded-lg font-medium text-[13px] transition-all shadow-sm flex items-center gap-2"
+          >
+            <Target className="w-4 h-4" />
+            Active Distributors
+          </button>
+          <button 
+            onClick={() => {
+              setEditingLeadId(null);
+              if (activeTab === 'ads') {
+                setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: '', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
+                setIsAdLeadModalOpen(true);
+              } else if (activeTab === 'distributors') {
+                setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+                setIsDistributorModalOpen(true);
+              } else {
+                setFormData({ date: new Date().toISOString().split('T')[0], clientName: '', name: '', priority: '', place: '', country: '', personOfContact: '', pocDesignation: '', contactNo: '', personOfContact2: '', contactNo2: '', referralPerson: '', email: '', currentStatus: 'New Lead', fPrice: '', lPrice: '', lastContacted: '', nextFollowUp: '', remarks: '', leadType: 'Hospital', customLeadType: '', assignedToName: isAdmin ? '' : (employeeData?.name || ''), message: '' });
+                setIsModalOpen(true);
+              }
+            }}
+            className="bg-black hover:bg-zinc-900 text-white px-4 py-2 rounded-lg font-medium text-[13px] transition-all shadow-[0_2px_10px_rgba(0,0,0,0.1)] flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            {activeTab === 'ads' ? 'Add Ad Lead' : activeTab === 'distributors' ? 'Add Distributor' : 'Add Regular Lead'}
+          </button>
+
+        </div>
+      </header>
+
+      {todaysGlobalFollowUps.length > 0 && (
+        <div className="mb-6 bg-red-50/50 border border-red-100 rounded-xl p-4 shadow-sm">
+          <div className="flex flex-col mb-3">
+            <h2 className="text-[14px] font-bold text-red-900 flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-red-600" />
+              Today's Follow-Ups
+            </h2>
+            <p className="text-[12px] text-red-700/80">Across all segments</p>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-2 no-scrollbar">
+            {todaysGlobalFollowUps.map(lead => (
+              <div 
+                key={lead.id} 
+                onClick={() => { setQuickUpdateLead(lead);  }}
+                className="flex-shrink-0 w-64 bg-white border border-red-100 rounded-lg p-3 cursor-pointer hover:shadow-md hover:border-red-300 transition-all group relative overflow-hidden"
+              >
+                <div className="absolute top-0 left-0 w-1 h-full bg-red-400 group-hover:bg-red-600 transition-colors" />
+                <div className="flex justify-between items-start mb-1.5 pl-2">
+                  <span className="text-[11px] font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded-full">{lead._sourceCollection}</span>
+                  <span className="text-[10px] font-medium text-zinc-400">{lead._segmentName}</span>
+                </div>
+                <div className="pl-2">
+                  <p className="text-[13px] font-bold text-zinc-900 truncate">{lead.clientName || lead.name || lead.distributorName || 'Unnamed'}</p>
+                  <p className="text-[11px] text-zinc-500 mt-0.5 truncate">{lead.phone || lead.contactNo || lead.contactNumber || 'No Phone'}</p>
+                  <p className="text-[11px] text-zinc-400 mt-1">Ref: {lead.personOfContact || lead.contactPersonName || 'N/A'}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="flex-1 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-black"></div>
+        </div>
+      ) : (
+        <>
+          {/* Custom Tabs */}
+          <div className="flex items-center gap-6 border-b border-zinc-200/80 mb-6 overflow-x-auto no-scrollbar whitespace-nowrap">
+        {[
+          { id: 'ads', label: 'Ad Leads', count: adLeads.length },
+          { id: 'regular', label: 'Regular Leads', count: regularLeads.length },
+          { id: 'distributors', label: 'Distributors', count: distributors.length },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`pb-3 text-[14px] font-medium transition-all relative ${
+              activeTab === tab.id ? 'text-black' : 'text-zinc-500 hover:text-zinc-700'
+            }`}
+          >
+            <span className="flex items-center gap-2">
+              {tab.label}
+              <span className={`px-2 py-0.5 rounded-full text-[11px] ${
+                activeTab === tab.id ? 'bg-black text-white' : 'bg-zinc-100 text-zinc-500'
+              }`}>
+                {tab.count}
+              </span>
+            </span>
+            {activeTab === tab.id && (
+              <span className="absolute bottom-0 left-0 w-full h-[2px] bg-black rounded-t-full"></span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      {/* Status Filter Pills */}
+      <div className="flex flex-wrap items-center gap-2 mb-6">
+        <button 
+          onClick={() => {
+            setStatusFilter('');
+            setCurrentPage(1);
+          }}
+          className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-medium transition-all border bg-zinc-50 border-zinc-200 text-zinc-700 ${statusFilter === '' ? 'ring-2 ring-offset-1 ring-black/20 opacity-100' : 'opacity-70 hover:opacity-100'}`}
+        >
+          All
+          <span className="bg-black/10 text-black/70 px-1.5 py-0.5 rounded-md text-[10px] ml-1 font-bold">{dataFilteredByOtherThanStatus.length}</span>
+        </button>
+        {(activeTab === 'distributors' ? DISTRIBUTOR_STATUS_OPTIONS : LEAD_STATUS_OPTIONS).map(opt => (
+          <button 
+            key={opt.value}
+            onClick={() => {
+              setStatusFilter(statusFilter === opt.value ? '' : opt.value);
+              setCurrentPage(1);
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-medium transition-all border ${getStatusColor(opt.value)} ${statusFilter === opt.value ? 'ring-2 ring-offset-1 ring-black/20 opacity-100' : 'opacity-70 hover:opacity-100'}`}
+          >
+            {opt.label}
+            <span className="bg-white/60 text-black/70 px-1.5 py-0.5 rounded-md text-[10px] ml-1 font-bold">{statusCounts[opt.value] || 0}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Main Content Area */}
+      <div className="bg-white border border-zinc-200/80 rounded-2xl shadow-[0_2px_8px_rgba(0,0,0,0.02)] overflow-hidden flex-1 flex flex-col">
+        
+        {/* Search & Filters */}
+        <div className="p-4 border-b border-zinc-100 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+          <div className="relative w-full xl:w-[400px] shrink-0">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+            <input 
+              type="text" 
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setCurrentPage(1); }}
+              placeholder={`Search ${activeTab} data...`} 
+              className="w-full pl-9 pr-4 py-2 bg-zinc-50 border border-zinc-200 focus:bg-white focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 outline-none rounded-lg text-[13px] transition-all"
+            />
+          </div>
+          
+          <div className="flex items-center gap-3 w-full overflow-x-auto no-scrollbar pb-1">
+
+            {/* Sort By Dropdown (Available for ALL employees) */}
+            <div className="relative w-48 sm:w-56 shrink-0">
+              <ArrowUpDown className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+              <select 
+                value={sortBy}
+                onChange={(e) => { setSortBy(e.target.value); setCurrentPage(1); }}
+                className="w-full pl-9 pr-8 py-2 bg-zinc-50 border border-zinc-200 focus:bg-white focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 outline-none rounded-lg text-[13px] transition-all appearance-none cursor-pointer text-zinc-700 font-medium"
+                title="Sort by Added Time, Last Updated Time, or Follow Up Date"
+              >
+                <option value="added-desc">Added Time: Newest First</option>
+                <option value="added-asc">Added Time: Oldest First</option>
+                <option value="updated-desc">Last Updated: Most Recent</option>
+                <option value="updated-asc">Last Updated: Oldest First</option>
+                <option value="followup-asc">Follow Up Date: Nearest First</option>
+                <option value="followup-desc">Follow Up Date: Furthest First</option>
+                <option value="touchpoints-desc">Frequently Contacted: Most First</option>
+              </select>
+            </div>
+
+            <div className="relative w-36 sm:w-44 shrink-0">
+              <AlertCircle className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+              <select 
+                value={priorityFilter}
+                onChange={(e) => { setPriorityFilter(e.target.value); setCurrentPage(1); }}
+                className="w-full pl-9 pr-8 py-2 bg-zinc-50 border border-zinc-200 focus:bg-white focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 outline-none rounded-lg text-[13px] transition-all appearance-none cursor-pointer text-zinc-700"
+              >
+                <option value="All">All Priorities</option>
+                <option value="High">High Priority</option>
+                <option value="Medium">Medium Priority</option>
+                <option value="Low">Low Priority</option>
+              </select>
+            </div>
+            
+            {(isAdmin || isManager) && (
+              <div className="relative w-40 sm:w-48 shrink-0">
+                <User className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+                <select 
+                  value={employeeFilter}
+                  onChange={(e) => { setEmployeeFilter(e.target.value); setCurrentPage(1); }}
+                  className="w-full pl-9 pr-8 py-2 bg-zinc-50 border border-zinc-200 focus:bg-white focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 outline-none rounded-lg text-[13px] transition-all appearance-none cursor-pointer text-zinc-700"
+                >
+                  <option value="">All Associates</option>
+                  {uniqueEmployees.map(emp => (
+                    <option key={emp} value={emp}>{emp}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="relative w-40 sm:w-48 shrink-0">
+              <Calendar className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+              <select 
+                value={monthFilter}
+                onChange={(e) => { setMonthFilter(e.target.value); setCurrentPage(1); }}
+                className="w-full pl-9 pr-8 py-2 bg-zinc-50 border border-zinc-200 focus:bg-white focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 outline-none rounded-lg text-[13px] transition-all appearance-none cursor-pointer text-zinc-700"
+              >
+                <option value="">All Months</option>
+                {uniqueMonths.map(month => (
+                  <option key={month} value={month}>{month}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-1 shrink-0 bg-zinc-50 border border-zinc-200 rounded-lg p-1.5 focus-within:bg-white focus-within:border-zinc-300 focus-within:ring-2 focus-within:ring-zinc-100 transition-all">
+              <select
+                value={exactDateFilterType}
+                onChange={(e) => { setExactDateFilterType(e.target.value); setCurrentPage(1); }}
+                className="bg-transparent border-none text-[12px] font-medium text-zinc-600 outline-none cursor-pointer pr-1"
+                title="Select which date to filter by"
+              >
+                <option value="added">Added Date</option>
+                <option value="updated">Last Updated</option>
+              </select>
+              <input
+                type="date"
+                value={exactDateFilter}
+                onChange={(e) => { setExactDateFilter(e.target.value); setCurrentPage(1); }}
+                className="bg-transparent border-none text-[13px] text-zinc-700 outline-none cursor-pointer w-[110px]"
+                title={`Select ${exactDateFilterType === 'added' ? 'Added Date' : 'Last Updated Date'}`}
+              />
+              {exactDateFilter && (
+                <button 
+                  onClick={() => { setExactDateFilter(''); setCurrentPage(1); }}
+                  className="p-1 hover:bg-zinc-200 rounded-md text-zinc-400 hover:text-red-500 transition-colors"
+                  title="Clear date filter"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="relative w-40 sm:w-48 shrink-0">
+              <Tag className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
+              <select 
+                value={leadTypeFilter}
+                onChange={(e) => { setLeadTypeFilter(e.target.value); setCurrentPage(1); }}
+                className="w-full pl-9 pr-8 py-2 bg-zinc-50 border border-zinc-200 focus:bg-white focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 outline-none rounded-lg text-[13px] transition-all appearance-none cursor-pointer text-zinc-700"
+              >
+                <option value="">All Lead Types</option>
+                {uniqueLeadTypes.map(type => (
+                  <option key={type} value={type}>{type}</option>
+                ))}
+              </select>
+            </div>
+
+            <button
+              onClick={() => { setShowIrregularPhonesOnly(!showIrregularPhonesOnly); setCurrentPage(1); }}
+              className={`px-3 py-2 shrink-0 rounded-lg text-[13px] font-medium transition-all border flex items-center gap-2 whitespace-nowrap ${
+                showIrregularPhonesOnly 
+                  ? 'bg-amber-100 border-amber-200 text-amber-800' 
+                  : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100'
+              }`}
+              title="Show leads with short, repeating, or blank phone numbers"
+            >
+              <AlertCircle className="w-4 h-4" />
+              {showIrregularPhonesOnly ? 'Irregular Phones' : 'Irregular Phones'}
+            </button>
+            <button
+              onClick={() => { setShowMissedFollowUpsOnly(!showMissedFollowUpsOnly); setCurrentPage(1); }}
+              className={`px-3 py-2 shrink-0 rounded-lg text-[13px] font-medium transition-all border flex items-center gap-2 whitespace-nowrap ${
+                showMissedFollowUpsOnly 
+                  ? 'bg-red-100 border-red-200 text-red-800' 
+                  : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100'
+              }`}
+              title="Show leads that missed their follow-up date"
+            >
+              <Calendar className="w-4 h-4" />
+              Missed Follow Ups
+            </button>
+
+            {/* Frequently Contacted Quick Filter Button */}
+            <button
+              onClick={() => { setShowFrequentlyContactedOnly(!showFrequentlyContactedOnly); setCurrentPage(1); }}
+              className={`px-3 py-2 shrink-0 rounded-lg text-[13px] font-medium transition-all border flex items-center gap-1.5 whitespace-nowrap select-none ${
+                showFrequentlyContactedOnly 
+                  ? 'bg-amber-100 border-amber-300 text-amber-900 shadow-sm ring-2 ring-amber-400/20' 
+                  : 'bg-zinc-50 border-zinc-200 text-zinc-600 hover:bg-zinc-100'
+              }`}
+              title="Filter by Frequently Contacted (Rule: 3+ recorded interactions / status updates / dated logs)"
+            >
+              <Flame className={`w-4 h-4 ${showFrequentlyContactedOnly ? 'text-amber-600 fill-amber-500' : 'text-zinc-400'}`} />
+              <span>Frequently Contacted</span>
+              <span className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold ${
+                showFrequentlyContactedOnly ? 'bg-amber-200 text-amber-900' : 'bg-zinc-200/80 text-zinc-600'
+              }`}>
+                {currentData.filter(isFrequentlyContacted).length}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Frequently Contacted Active Banner with Rule Explanation */}
+        {showFrequentlyContactedOnly && (
+          <div className="px-4 py-2.5 bg-gradient-to-r from-amber-50 to-orange-50 border-b border-amber-200/80 flex items-center justify-between text-[12px] text-amber-950">
+            <div className="flex items-center gap-2">
+              <span className="p-1 bg-amber-100 rounded-md text-amber-600">
+                <Flame className="w-3.5 h-3.5 fill-amber-500" />
+              </span>
+              <span>
+                <strong>Frequently Contacted Active:</strong> Showing leads with <strong>3+ contact touchpoints</strong> (multiple status updates, follow-up logs, or remarks).
+              </span>
+            </div>
+            <button
+              onClick={() => { setShowFrequentlyContactedOnly(false); setCurrentPage(1); }}
+              className="px-2.5 py-1 text-xs font-semibold bg-amber-100/80 hover:bg-amber-200 text-amber-900 rounded-md transition-colors"
+            >
+              Clear Filter
+            </button>
+          </div>
+        )}
+
+        {/* Regular Leads View */}
+        {activeTab === 'regular' && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[500px] sm:min-w-[700px]">
+              <thead>
+                <tr className="border-b border-zinc-100 bg-zinc-50/50">
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-8 sm:w-12 text-center">#</th>
+                  <th 
+                    onClick={() => {
+                      setSortBy(prev => prev === 'added-desc' ? 'added-asc' : 'added-desc');
+                      setCurrentPage(1);
+                    }}
+                    className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[100px] cursor-pointer hover:bg-zinc-100/70 transition-colors select-none"
+                    title="Click to sort by Added Date"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Added Date</span>
+                      <ArrowUpDown className={`w-3 h-3 ${sortBy.startsWith('added') ? 'text-zinc-900' : 'text-zinc-300'}`} />
+                    </div>
+                  </th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[120px] sm:w-[220px]">Lead Info</th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[120px] sm:w-[180px]">Status</th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[100px] sm:w-[120px]">Associate</th>
+                  <th 
+                    onClick={() => {
+                      setSortBy(prev => prev === 'followup-asc' ? 'followup-desc' : 'followup-asc');
+                      setCurrentPage(1);
+                    }}
+                    className="hidden md:table-cell p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider max-w-[150px] cursor-pointer hover:bg-zinc-100/70 transition-colors select-none"
+                    title="Click to sort by Follow Up Date"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Next Follow Up</span>
+                      <ArrowUpDown className={`w-3 h-3 ${sortBy.startsWith('followup') ? 'text-zinc-900' : 'text-zinc-300'}`} />
+                    </div>
+                  </th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider text-right w-16 sm:w-24">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {filteredRegularLeads.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((lead, index) => {
+                  const leadDate = new Date(lead.date || (lead.createdAt?.seconds ? lead.createdAt.seconds * 1000 : lead.createdAt));
+                  const dateString = isNaN(leadDate) ? 'N/A' : leadDate.toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' });
+                  return (
+                  <tr 
+                    key={lead.id} 
+                    className={`transition-colors cursor-pointer group ${isMissedFollowUp(lead) ? 'bg-red-50/40 hover:bg-red-100/50' : 'hover:bg-zinc-50/50'}`}
+                    onClick={() => { setQuickUpdateLead(lead);  }}
+                  >
+                    <td className="px-5 py-4 text-[13px] text-zinc-500 font-medium relative">
+                      {isRecentLead(lead) && (
+                        <span className="absolute top-0 left-0 bg-emerald-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-br-md shadow-sm uppercase tracking-wider z-10 leading-none">
+                          NEW
+                        </span>
+                      )}
+                      {lead.priority && (
+                        <span className={`absolute bottom-0 left-0 text-white text-[9px] font-black px-1.5 py-0.5 rounded-tr-md shadow-sm uppercase tracking-wider z-10 leading-none ${
+                          lead.priority === 'High' || lead.priority === 'Urgent' ? 'bg-red-500' :
+                          lead.priority === 'Medium' ? 'bg-orange-500' :
+                          'bg-green-500'
+                        }`}>
+                          {lead.priority}
+                        </span>
+                      )}
+                      {(currentPage - 1) * itemsPerPage + index + 1}
+                    </td>
+                    <td className="p-3 sm:p-4 text-[11px] sm:text-[12px] text-zinc-500 font-medium whitespace-nowrap">
+                      <div className="flex flex-col items-start sm:items-center gap-0.5">
+                        {lead.lastContacted ? (
+                          <>
+                            <span className="font-medium" title="Last Contacted">
+                              {new Date(lead.lastContacted).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            </span>
+                            <ArrowUp className="w-3 h-3 text-zinc-400" />
+                            <span className="text-[10px] sm:text-[11px] text-zinc-400 font-normal" title="Added Date">
+                              {dateString}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="font-medium" title="Added Date">{dateString}</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-3 sm:p-4">
+                      <div className="font-semibold text-black text-[12px] sm:text-[14px] flex items-center gap-1 sm:gap-2 truncate">
+                        <User className="w-3 h-3 sm:w-4 sm:h-4 text-zinc-400 shrink-0" />
+                        <span className="truncate">{lead.clientName || lead.name || 'N/A'}</span>
+                        {lead.transferredFromName && <span className="bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider ml-2 hidden sm:inline-block">Transferred from {lead.transferredFromName}</span>}
+                        {getContactTouchpoints(lead) >= 2 && (
+                          <span 
+                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ml-1.5 ${
+                              getContactTouchpoints(lead) >= 3 ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
+                            }`}
+                            title={`${getContactTouchpoints(lead)} contact interactions/updates recorded`}
+                          >
+                            <Flame className={`w-2.5 h-2.5 ${getContactTouchpoints(lead) >= 3 ? 'text-amber-600 fill-amber-500' : 'text-zinc-400'}`} />
+                            {getContactTouchpoints(lead)} contacts
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] sm:text-[12px] text-zinc-500 mt-1 flex items-center gap-1 truncate">
+                        <Phone className="w-2.5 h-2.5 sm:w-3 sm:h-3 shrink-0" /> 
+                        <span className="truncate">{lead.contactNo || 'N/A'}</span>
+                        {lead.contactNo && (
+                          <div className="flex items-center gap-0.5 ml-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(lead.contactNo);
+                                Swal.fire({ title: 'Copied!', text: 'Phone number copied to clipboard', icon: 'success', timer: 1000, showConfirmButton: false });
+                              }}
+                              className="p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-black transition-colors"
+                              title="Copy Number"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
+                            <a
+                              href={`https://wa.me/${(lead.contactNo || '').replace(/[^0-9]/g, '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="p-1 hover:bg-green-100 rounded text-zinc-400 hover:text-[#25D366] transition-colors"
+                              title="Chat on WhatsApp"
+                            >
+                              <MessageSquare className="w-3 h-3" />
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                      {lead.personOfContact && (
+                        <div className="mt-1 text-[10px] sm:text-[11px] text-zinc-500 truncate max-w-[130px] sm:max-w-[200px]">
+                          POC: {lead.personOfContact}
+                        </div>
+                      )}
+                      {lead.remarks && (
+                        <div className="mt-1.5 text-[10px] sm:text-[11px] text-zinc-500 bg-zinc-50 px-1.5 py-1 rounded border border-zinc-100 max-w-[130px] sm:max-w-[200px] line-clamp-2" title={lead.remarks}>
+                          {lead.remarks}
+                        </div>
+                      )}
+                      {isMissedFollowUp(lead) && (
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <span className="text-[9px] sm:text-[10px] text-red-600 font-bold uppercase tracking-wider">Missed Follow-up</span>
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-3 sm:p-4">
+                      <span className={`inline-flex items-center px-1.5 sm:px-2 py-0.5 rounded-md text-[10px] sm:text-[12px] font-medium ring-1 ring-inset ${getStatusColor(lead.currentStatus)}`}>
+                        {lead.currentStatus || 'N/A'}
+                      </span>
+                      <div className="text-[11px] sm:text-[12px] font-medium text-zinc-900 mt-1.5 truncate max-w-[130px] sm:max-w-[180px]">
+                        {lead.place || lead.institutionName || 'N/A'}
+                      </div>
+                      <div className="text-[10px] sm:text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1 truncate max-w-[130px] sm:max-w-[180px]">
+                        <Tag className="w-3 h-3 shrink-0" /> <span className="truncate">{lead.leadType === 'Custom' ? lead.customLeadType : (lead.leadType || 'No Lead Type')}</span>
+                      </div>
+                    </td>
+                    <td className="p-3 sm:p-4">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 rounded-full bg-zinc-100 flex items-center justify-center shrink-0">
+                          <User className="w-3 h-3 text-zinc-500" />
+                        </div>
+                        <div className="text-[12px] font-medium text-zinc-700 truncate max-w-[100px]">
+                          {lead.employeeName || 'Unassigned'}
+                        </div>
+                      </div>
+                    </td>
+                    <td className={`hidden md:table-cell p-3 sm:p-4 text-[12px] font-medium ${isMissedFollowUp(lead) ? 'text-red-600' : 'text-zinc-600'}`}>
+                      {lead.nextFollowUp || 'N/A'}
+                    </td>
+                    <td className="p-3 sm:p-4 text-right">
+                      <button className="p-1 sm:p-1.5 text-zinc-400 hover:text-black hover:bg-zinc-100 rounded-md transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100">
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <Pagination totalItems={filteredRegularLeads.length} currentPage={currentPage} setCurrentPage={setCurrentPage} itemsPerPage={itemsPerPage} />
+          </div>
+        )}
+
+        {/* Ad Leads View */}
+        {activeTab === 'ads' && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[500px] sm:min-w-[700px]">
+              <thead>
+                <tr className="border-b border-zinc-100 bg-zinc-50/50">
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-8 sm:w-12 text-center">#</th>
+                  <th 
+                    onClick={() => {
+                      setSortBy(prev => prev === 'added-desc' ? 'added-asc' : 'added-desc');
+                      setCurrentPage(1);
+                    }}
+                    className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[100px] cursor-pointer hover:bg-zinc-100/70 transition-colors select-none"
+                    title="Click to sort by Added Date"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Added Date</span>
+                      <ArrowUpDown className={`w-3 h-3 ${sortBy.startsWith('added') ? 'text-zinc-900' : 'text-zinc-300'}`} />
+                    </div>
+                  </th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[120px] sm:w-[220px]">Lead Info</th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[120px] sm:w-[180px]">Status</th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider w-[100px] sm:w-[120px]">Associate</th>
+                  <th className="hidden md:table-cell p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider max-w-[150px]">Message</th>
+                  <th className="p-3 sm:p-4 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider text-right w-16 sm:w-24">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {filteredAdLeads.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((lead, index) => (
+                  <tr key={lead.id} className={`transition-colors group cursor-pointer ${
+                    isMissedFollowUp(lead) ? 'bg-red-50/40 hover:bg-red-100/50' : 
+                    (!(lead.statusHistory?.length > 1) && !(lead.history?.length > 1)) ? 'bg-blue-50/80 hover:bg-blue-100/80' : 
+                    'hover:bg-zinc-50/50'
+                  }`} onClick={() => { setQuickUpdateLead(lead);  }}>
+                    <td className="px-5 py-4 text-[13px] text-zinc-500 font-medium relative">
+                      {isRecentLead(lead) && (
+                        <span className="absolute top-0 left-0 bg-emerald-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-br-md shadow-sm uppercase tracking-wider z-10 leading-none">
+                          NEW
+                        </span>
+                      )}
+                      {lead.priority && (
+                        <span className={`absolute bottom-0 left-0 text-white text-[9px] font-black px-1.5 py-0.5 rounded-tr-md shadow-sm uppercase tracking-wider z-10 leading-none ${
+                          lead.priority === 'High' || lead.priority === 'Urgent' ? 'bg-red-500' :
+                          lead.priority === 'Medium' ? 'bg-orange-500' :
+                          'bg-green-500'
+                        }`}>
+                          {lead.priority}
+                        </span>
+                      )}
+                      {(currentPage - 1) * itemsPerPage + index + 1}
+                    </td>
+                    <td className="p-3 sm:p-4 text-[11px] sm:text-[12px] text-zinc-500 font-medium whitespace-nowrap">
+                      <div className="flex flex-col items-start sm:items-center gap-0.5">
+                        {lead.lastContacted ? (
+                          <>
+                            <span className="font-medium" title="Last Contacted">
+                              {new Date(lead.lastContacted).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            </span>
+                            <ArrowUp className="w-3 h-3 text-zinc-400" />
+                            <span className="text-[10px] sm:text-[11px] text-zinc-400 font-normal" title="Added Date">
+                              {lead.date ? new Date(lead.date).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }) : 
+                               lead.createdAt?.seconds ? new Date(lead.createdAt.seconds * 1000).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A'}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="font-medium" title="Added Date">
+                            {lead.date ? new Date(lead.date).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }) : 
+                             lead.createdAt?.seconds ? new Date(lead.createdAt.seconds * 1000).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A'}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="p-3 sm:p-4">
+                      <div className="font-semibold text-black text-[12px] sm:text-[14px] flex items-center gap-1 sm:gap-2 truncate">
+                        <User className="w-3 h-3 sm:w-4 sm:h-4 text-zinc-400 shrink-0" />
+                        <span className="truncate">{lead.name}</span>
+                        {lead.transferredFromName && <span className="bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider ml-2 hidden sm:inline-block">Transferred from {lead.transferredFromName}</span>}
+                        {getContactTouchpoints(lead) >= 2 && (
+                          <span 
+                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ml-1.5 ${
+                              getContactTouchpoints(lead) >= 3 ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
+                            }`}
+                            title={`${getContactTouchpoints(lead)} contact interactions/updates recorded`}
+                          >
+                            <Flame className={`w-2.5 h-2.5 ${getContactTouchpoints(lead) >= 3 ? 'text-amber-600 fill-amber-500' : 'text-zinc-400'}`} />
+                            {getContactTouchpoints(lead)} contacts
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] sm:text-[12px] text-zinc-500 mt-1 flex items-center gap-1 truncate">
+                        <Phone className="w-2.5 h-2.5 sm:w-3 sm:h-3 shrink-0" /> 
+                        <span className="truncate">{lead.contactNumber}</span>
+                        {lead.contactNumber && (
+                          <div className="flex items-center gap-0.5 ml-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(lead.contactNumber);
+                                Swal.fire({ title: 'Copied!', text: 'Phone number copied to clipboard', icon: 'success', timer: 1000, showConfirmButton: false });
+                              }}
+                              className="p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-black transition-colors"
+                              title="Copy Number"
+                            >
+                              <Copy className="w-3 h-3" />
+                            </button>
+                            <a
+                              href={`https://wa.me/${(lead.contactNumber || '').replace(/[^0-9]/g, '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="p-1 hover:bg-green-100 rounded text-zinc-400 hover:text-[#25D366] transition-colors"
+                              title="Chat on WhatsApp"
+                            >
+                              <MessageSquare className="w-3 h-3" />
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                      {lead.remarks && (
+                        <div className="mt-1.5 text-[10px] sm:text-[11px] text-zinc-500 bg-zinc-50 px-1.5 py-1 rounded border border-zinc-100 max-w-[130px] sm:max-w-[200px] line-clamp-2" title={lead.remarks}>
+                          {lead.remarks}
+                        </div>
+                      )}
+                      {isMissedFollowUp(lead) && (
+                        <div className="mt-1.5 flex items-center gap-2">
+                          <span className="text-[9px] sm:text-[10px] text-red-600 font-bold uppercase tracking-wider">Missed Follow-up</span>
+                        </div>
+                      )}
+                    </td>
+                    <td className="p-3 sm:p-4">
+                      <span className={`inline-flex items-center px-1.5 sm:px-2 py-0.5 rounded-md text-[10px] sm:text-[12px] font-medium ring-1 ring-inset ${getStatusColor(lead.currentStatus)}`}>
+                        {lead.currentStatus}
+                      </span>
+                      <div className="text-[11px] sm:text-[12px] font-medium text-zinc-900 mt-1.5 truncate max-w-[130px] sm:max-w-[180px]">
+                        {lead.institutionName || 'No Institution'}
+                      </div>
+                      <div className="text-[10px] sm:text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1 truncate max-w-[130px] sm:max-w-[180px]">
+                        <MapPin className="w-3 h-3 shrink-0" /> <span className="truncate">{lead.region || 'No Region'}</span>
+                      </div>
+                      <div className="text-[10px] sm:text-[11px] text-zinc-500 mt-0.5 flex items-center gap-1 truncate max-w-[130px] sm:max-w-[180px]">
+                        <Tag className="w-3 h-3 shrink-0" /> <span className="truncate">{lead.leadType === 'Custom' ? lead.customLeadType : (lead.leadType || 'No Lead Type')}</span>
+                      </div>
+                    </td>
+                    <td className="p-3 sm:p-4">
+                      <div className="flex items-center gap-2">
+                        <div className="w-6 h-6 rounded-full bg-zinc-100 flex items-center justify-center shrink-0">
+                          <User className="w-3 h-3 text-zinc-500" />
+                        </div>
+                        <div className="text-[12px] font-medium text-zinc-700 truncate max-w-[100px]">
+                          {lead.assignedToName || 'Unassigned'}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="hidden md:table-cell p-3 sm:p-4 max-w-[150px]">
+                      <p className="text-[11px] sm:text-[12px] text-zinc-600 line-clamp-2" title={lead.message}>
+                        "{lead.message}"
+                      </p>
+                      <p className="text-[10px] sm:text-[11px] text-zinc-400 mt-1 truncate">Type: {lead.leadType}</p>
+                    </td>
+                    <td className="p-3 sm:p-4 text-right">
+                      <button className="p-1 sm:p-1.5 text-zinc-400 hover:text-black hover:bg-zinc-100 rounded-md transition-colors opacity-100 sm:opacity-0 sm:group-hover:opacity-100">
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <Pagination totalItems={filteredAdLeads.length} currentPage={currentPage} setCurrentPage={setCurrentPage} itemsPerPage={itemsPerPage} />
+          </div>
+        )}
+
+        {/* Distributors View */}
+        {activeTab === 'distributors' && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-[900px]">
+              <thead>
+                <tr className="border-b border-zinc-100 bg-zinc-50/50">
+                  <th className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider w-12">#</th>
+                  <th 
+                    onClick={() => {
+                      setSortBy(prev => prev === 'added-desc' ? 'added-asc' : 'added-desc');
+                      setCurrentPage(1);
+                    }}
+                    className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider cursor-pointer hover:bg-zinc-100/70 transition-colors select-none"
+                    title="Click to sort by Added Date"
+                  >
+                    <div className="flex items-center gap-1">
+                      <span>Added Date</span>
+                      <ArrowUpDown className={`w-3 h-3 ${sortBy.startsWith('added') ? 'text-zinc-900' : 'text-zinc-300'}`} />
+                    </div>
+                  </th>
+                  <th className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider">Distributor</th>
+                  <th className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider">Contact Person</th>
+                  <th className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider">Performance</th>
+                  <th className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider">Status</th>
+                  <th className="px-5 py-3 text-[12px] font-semibold text-zinc-500 uppercase tracking-wider text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100">
+                {filteredDistributors.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage).map((dist, index) => (
+                  <tr key={dist.id} className={`transition-colors group cursor-pointer ${isMissedFollowUp(dist) ? 'bg-red-50/40 hover:bg-red-100/50' : 'hover:bg-zinc-50/50'}`} onClick={() => { setQuickUpdateLead(dist);  }}>
+                    <td className="px-5 py-4 text-[13px] text-zinc-500 font-medium relative">
+                      {isRecentLead(dist) && (
+                        <span className="absolute top-0 left-0 bg-emerald-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-br-md shadow-sm uppercase tracking-wider z-10 leading-none">
+                          NEW
+                        </span>
+                      )}
+                      {dist.priority && (
+                        <span className={`absolute bottom-0 left-0 text-white text-[9px] font-black px-1.5 py-0.5 rounded-tr-md shadow-sm uppercase tracking-wider z-10 leading-none ${
+                          dist.priority === 'High' || dist.priority === 'Urgent' ? 'bg-red-500' :
+                          dist.priority === 'Medium' ? 'bg-orange-500' :
+                          'bg-green-500'
+                        }`}>
+                          {dist.priority}
+                        </span>
+                      )}
+                      {(currentPage - 1) * itemsPerPage + index + 1}
+                    </td>
+                    <td className="px-5 py-4 text-[13px] text-zinc-500 font-medium whitespace-nowrap">
+                      <div className="flex flex-col items-start sm:items-center gap-0.5">
+                        {dist.lastContacted ? (
+                          <>
+                            <span className="font-medium" title="Last Contacted">
+                              {new Date(dist.lastContacted).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            </span>
+                            <ArrowUp className="w-3 h-3 text-zinc-400" />
+                            <span className="text-[11px] text-zinc-400 font-normal" title="Added Date">
+                              {dist.createdAt?.seconds ? new Date(dist.createdAt.seconds * 1000).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A'}
+                            </span>
+                          </>
+                        ) : (
+                          <span className="font-medium" title="Added Date">
+                            {dist.createdAt?.seconds ? new Date(dist.createdAt.seconds * 1000).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' }) : 'N/A'}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="font-semibold text-black text-[14px] flex items-center gap-2">
+                        <Target className="w-4 h-4 text-zinc-400" />
+                        {dist.distributorName || 'N/A'}
+                        {dist.transferredFromName && <span className="bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider">Transferred from {dist.transferredFromName}</span>}
+                        {getContactTouchpoints(dist) >= 2 && (
+                          <span 
+                            className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold shrink-0 ml-1.5 ${
+                              getContactTouchpoints(dist) >= 3 ? 'bg-amber-100 text-amber-800 border border-amber-300' : 'bg-zinc-100 text-zinc-600 border border-zinc-200'
+                            }`}
+                            title={`${getContactTouchpoints(dist)} contact interactions/updates recorded`}
+                          >
+                            <Flame className={`w-2.5 h-2.5 ${getContactTouchpoints(dist) >= 3 ? 'text-amber-600 fill-amber-500' : 'text-zinc-400'}`} />
+                            {getContactTouchpoints(dist)} contacts
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[12px] text-zinc-500 mt-1 flex items-center gap-1">
+                        <MapPin className="w-3 h-3" /> {dist.region || dist.state || 'N/A'}
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="text-[13px] font-medium text-zinc-900">{dist.contactPersonName || 'N/A'}</div>
+                      <div className="text-[12px] text-zinc-500 mt-1 flex items-center gap-1">
+                        <Phone className="w-3 h-3" /> 
+                        <span>{dist.contactNumber || 'N/A'}</span>
+                        {dist.contactNumber && (
+                          <div className="flex items-center gap-0.5 ml-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(dist.contactNumber);
+                                Swal.fire({ title: 'Copied!', text: 'Phone number copied to clipboard', icon: 'success', timer: 1000, showConfirmButton: false });
+                              }}
+                              className="p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-black transition-colors"
+                              title="Copy Number"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                            <a
+                              href={`https://wa.me/${(dist.contactNumber || '').replace(/[^0-9]/g, '')}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="p-1 hover:bg-green-100 rounded text-zinc-400 hover:text-[#25D366] transition-colors"
+                              title="Chat on WhatsApp"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                      {dist.remarks && (
+                        <div className="mt-1.5 text-[11px] text-zinc-500 bg-zinc-50 px-2 py-1 rounded border border-zinc-100 max-w-[200px] line-clamp-2" title={dist.remarks}>
+                          {dist.remarks}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="flex items-center gap-2">
+                        <div className="text-[20px] font-light text-black">{dist.onboardedClients || 0}</div>
+                        <div className="text-[11px] text-zinc-500 leading-tight">Clients<br/>Onboarded</div>
+                      </div>
+                    </td>
+                    <td className="px-5 py-4">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[12px] font-medium ring-1 ring-inset ${getStatusColor(dist.currentStatus)}`}>
+                        {dist.currentStatus || 'N/A'}
+                      </span>
+                      {isMissedFollowUp(dist) && <div className="text-[10px] text-red-600 font-bold mt-1 uppercase tracking-wider">Missed Follow-up</div>}
+                    </td>
+                    <td className="px-5 py-4 text-right">
+                      <button className="p-1.5 text-zinc-400 hover:text-black hover:bg-zinc-100 rounded-md transition-colors opacity-0 group-hover:opacity-100">
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <Pagination totalItems={filteredDistributors.length} currentPage={currentPage} setCurrentPage={setCurrentPage} itemsPerPage={itemsPerPage} />
+          </div>
+        )}
+
+
+
+      </div>
+        </>
+      )}
+      
+
+
+      {selectedLead && (
+        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 sm:p-6 backdrop-blur-sm" onClick={() => setSelectedLead(null)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[80vh] transform transition-all" onClick={e => e.stopPropagation()}>
+            <div className="bg-gradient-to-r from-zinc-900 to-zinc-800 p-6 sm:p-8 flex flex-col sm:flex-row items-start justify-between gap-5 relative overflow-hidden shrink-0">
+              <div className="absolute top-0 right-0 -translate-y-1/2 translate-x-1/3 opacity-10 pointer-events-none">
+                <Target className="w-64 h-64 text-white" />
+              </div>
+              <button 
+                onClick={() => setSelectedLead(null)}
+                className="absolute top-4 right-4 sm:hidden text-zinc-400 hover:text-white transition-colors bg-white/5 hover:bg-white/10 rounded-xl p-2 z-20"
+              >
+                <X className="w-5 h-5" />
+              </button>
+              
+              <div className="relative z-10 w-full sm:w-auto pr-10 sm:pr-0">
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <span className="bg-white/20 text-white text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md tracking-wide uppercase">
+                    Lead Profile
+                  </span>
+                  {selectedLead.currentStatus && (
+                    <span className="bg-emerald-500/20 text-emerald-300 text-[11px] font-bold px-2.5 py-1 rounded-full backdrop-blur-md border border-emerald-500/30 tracking-wide uppercase">
+                      {selectedLead.currentStatus}
+                    </span>
+                  )}
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight break-words">
+                  {selectedLead.clientName || selectedLead.name || selectedLead.distributorName || 'Unknown Lead'}
+                </h2>
+                {(selectedLead.place || selectedLead.region) && (
+                  <p className="text-zinc-400 mt-2 flex items-center gap-1.5 text-sm">
+                    <MapPin className="w-4 h-4" />
+                    {selectedLead.place || selectedLead.region} {selectedLead.country ? `, ${selectedLead.country}` : ''}
+                  </p>
+                )}
+              </div>
+              <div className="grid grid-cols-2 sm:flex items-center gap-3 relative z-10 w-full sm:w-auto mt-4 sm:mt-0">
+                {(activeTab === 'regular' || activeTab === 'ads' || activeTab === 'distributors') && (
+                  <button 
+                    onClick={() => openEditModal(selectedLead)}
+                    className="w-full sm:w-auto justify-center bg-white/10 text-white border border-white/20 hover:bg-white hover:text-black transition-all rounded-xl px-4 sm:px-5 py-2.5 sm:py-2 text-[13px] font-bold shadow-md flex items-center gap-2 backdrop-blur-md"
+                  >
+                    Edit Profile
+                  </button>
+                )}
+                <button 
+                  onClick={() => handleDeleteLead(selectedLead)}
+                  className="w-full sm:w-auto justify-center bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500 hover:text-white transition-all rounded-xl px-4 sm:px-5 py-2.5 sm:py-2 text-[13px] font-bold shadow-md flex items-center gap-2 backdrop-blur-md"
+                >
+                  Delete
+                </button>
+                <button 
+                  onClick={() => setSelectedLead(null)}
+                  className="hidden sm:flex text-zinc-400 hover:text-white transition-colors bg-white/5 hover:bg-white/10 border border-transparent hover:border-white/10 rounded-xl p-2 ml-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+            
+            <div className="p-6 sm:p-10 overflow-y-auto flex-1 bg-white">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-6">
+                {Object.entries(selectedLead)
+                  .filter(([k,v]) => {
+                    const ignoredKeys = ['clientName', 'name', 'distributorName', 'companyId', 'associate', 'id', 'addedBy', 'addedByName', 'assignedToUid', 'userId'];
+                    return typeof v !== 'object' && !ignoredKeys.includes(k);
+                  })
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([key, value]) => {
+                    const formattedKey = key === 'employeeName' ? 'Associate' : key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+                    return (
+                      <div key={key} className="flex items-start gap-4 pb-4 border-b border-zinc-100 group">
+                        <div className="mt-0.5 text-zinc-400 group-hover:text-black transition-colors">
+                          {getIconForKey(key)}
+                        </div>
+                        <div className="flex-1">
+                          <div className="text-[11px] uppercase tracking-wider font-semibold text-zinc-500 mb-0.5">
+                            {formattedKey}
+                          </div>
+                          <div className="text-[14px] text-zinc-900 font-medium whitespace-pre-wrap">
+                            {value || <span className="text-zinc-300 italic">Not provided</span>}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+              
+              {selectedLead.statusHistory && selectedLead.statusHistory.length > 0 && (
+                <div className="mt-8 border-t border-zinc-100 pt-6">
+                  <h3 className="text-[12px] font-bold text-zinc-800 mb-4 uppercase tracking-wider flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-zinc-400" />
+                    Update History
+                  </h3>
+                  <div className="space-y-6">
+                    {selectedLead.statusHistory.map((history, idx) => {
+                      const colorClass = getStatusColor(history.status);
+                      const bgClass = colorClass.split(' ')[0] || 'bg-zinc-50';
+                      const textClass = colorClass.split(' ')[1] || 'text-zinc-700';
+                      const dotColor = textClass.replace('text-', 'bg-');
+                      
+                      return (
+                        <div key={idx} className="flex gap-4 items-stretch relative">
+                          
+                          {/* Date on the Left */}
+                          <div className="w-24 shrink-0 text-right pt-1">
+                            <div className="text-[12px] font-bold text-zinc-700">
+                              {new Date(history.date).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                            </div>
+                            <div className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider mt-0.5">
+                              {new Date(history.date).toLocaleString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                            </div>
+                          </div>
+
+                          {/* Timeline Dot & Line */}
+                          <div className="relative flex flex-col items-center shrink-0 w-6 pt-1.5">
+                            {idx !== selectedLead.statusHistory.length - 1 && (
+                              <div className="absolute top-5 bottom-[-24px] w-0.5 bg-zinc-200"></div>
+                            )}
+                            <div className={`w-3.5 h-3.5 rounded-full z-10 border-2 border-black ${dotColor} ring-[3px] ring-white`}></div>
+                          </div>
+
+                          {/* Status & Remarks Box */}
+                          <div className={`flex-1 rounded-xl p-4 border ${colorClass}`}>
+                            <div className="font-bold text-[14px] mb-1">{history.status}</div>
+                            {history.remarks && (
+                              <p className="text-[13px] leading-relaxed opacity-90 mt-2 whitespace-pre-wrap">{history.remarks}</p>
+                            )}
+                          </div>
+                          
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Lead Modal */}
+      {/* Global Client Names Datalist for autocomplete */}
+      <datalist id="global-client-names">
+        {globalClients.filter(c => c.segment === activeSegment).map((c, idx) => (
+          <option key={`client-${idx}`} value={c.clientName} />
+        ))}
+      </datalist>
+
+      {/* Bulk Ad Lead Modal */}
+      {isBulkAdLeadModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isSubmitting && setIsBulkAdLeadModalOpen(false)}></div>
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-5 border-b border-zinc-100 bg-zinc-50/50">
+              <h2 className="text-[18px] font-semibold text-zinc-900">Bulk Assign Ad Leads</h2>
+              <button type="button" onClick={() => !isSubmitting && setIsBulkAdLeadModalOpen(false)} className="text-zinc-400 hover:text-black transition-colors p-1 bg-white rounded-full shadow-sm border border-zinc-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleBulkSaveAdLeads} className="flex flex-col">
+              <div className="p-6">
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider mb-2">Paste Phone Numbers</label>
+                    <textarea 
+                      required
+                      value={bulkAdLeadText} 
+                      onChange={(e) => setBulkAdLeadText(e.target.value)}
+                      rows="6"
+                      className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-[14px] text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400"
+                      placeholder="Paste numbers separated by spaces, commas, or new lines..."
+                    ></textarea>
+                    <p className="text-[11px] text-zinc-500 mt-1">The system will automatically extract all valid phone numbers.</p>
+                  </div>
+
+                  <div>
+                    <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider mb-2">Assign To Employee</label>
+                    <select
+                      required
+                      value={bulkAdLeadAssignedToUid}
+                      onChange={(e) => {
+                        const selectedEmp = allEmployees.find(emp => emp.id === e.target.value);
+                        setBulkAdLeadAssignedToUid(e.target.value);
+                        setBulkAdLeadAssignedToName(selectedEmp ? (selectedEmp.name || selectedEmp.email) : '');
+                      }}
+                      className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black outline-none text-[14px] transition-all text-zinc-800 cursor-pointer"
+                    >
+                      <option value="">Select an employee...</option>
+                      {allEmployees.filter(e => e.isActive !== false).map(emp => (
+                        <option key={emp.id} value={emp.id}>{emp.name || emp.email}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider mb-2">Campaign Data (Optional)</label>
+                    <select
+                      value={bulkAdLeadCampaign}
+                      onChange={(e) => setBulkAdLeadCampaign(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black outline-none text-[14px] transition-all text-zinc-800 cursor-pointer"
+                    >
+                      <option value="">No Campaign</option>
+                      {adCampaignsList.filter(c => c.status === 'Active').map(camp => (
+                        <option key={camp.id} value={camp.name}>{camp.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="p-5 border-t border-zinc-100 bg-zinc-50/50 flex justify-end gap-3">
+                <button type="button" onClick={() => !isSubmitting && setIsBulkAdLeadModalOpen(false)} className="px-5 py-2.5 rounded-xl text-[13px] font-bold text-zinc-600 bg-white border border-zinc-200 hover:bg-zinc-50 hover:text-zinc-900 transition-colors">
+                  Cancel
+                </button>
+                <button type="submit" disabled={isSubmitting} className="px-5 py-2.5 rounded-xl text-[13px] font-bold text-white bg-black hover:bg-zinc-800 transition-colors shadow-md flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                  {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Processing...</> : 'Assign Leads'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {isModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isSubmitting && setIsModalOpen(false)}></div>
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-5 border-b border-zinc-100 bg-zinc-50/50">
+              <h2 className="text-[18px] font-semibold text-zinc-900">{editingLeadId ? 'Edit Lead Profile' : 'New Lead Profile'}</h2>
+              <button type="button" onClick={() => {
+                if (!isSubmitting) {
+                  setIsModalOpen(false);
+                  setEditingLeadId(null);
+                  setFormData({ date: new Date().toISOString().split('T')[0], clientName: '', name: '', priority: '', place: '', country: '', personOfContact: '', pocDesignation: '', contactNo: '', personOfContact2: '', contactNo2: '', referralPerson: '', email: '', currentStatus: 'New Lead', fPrice: '', lPrice: '', lastContacted: '', nextFollowUp: '', remarks: '', leadType: 'Hospital', customLeadType: '', assignedToName: isAdmin ? '' : (employeeData?.name || ''), message: '' });
+                }
+              }} className="text-zinc-400 hover:text-black transition-colors p-1 bg-white rounded-full shadow-sm border border-zinc-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleSaveLead} className="flex flex-col max-h-[85vh]">
+              <div className="p-6 sm:p-8 overflow-y-auto no-scrollbar flex-1 bg-white">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-2">
+                  
+                  {/* Left Column */}
+                  <div className="flex flex-col gap-1">
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Core Details</h3>
+
+                    <div className="flex flex-col py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <div className="flex items-center w-full">
+                        <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Client Name*</label>
+                        <input type="text" list="global-client-names" required name="clientName" value={formData.clientName} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. Acme Corp" />
+                      </div>
+                      <RenderSimilarClients fieldName="clientName" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Status</label>
+                      <select name="currentStatus" value={formData.currentStatus} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="New Lead">New Lead</option>
+                        <option value="Called, no response">Called, No Response</option>
+                        <option value="Contacted">Contacted</option>
+                        <option value="Connected via whatsapp">Connected via whatsapp</option>
+                        <option value="Interested">Interested</option>
+                        <option value="Follow up needed">Follow-Up Needed</option>
+                        <option value="Quotation Sent">Quotation Sent</option>
+                        <option value="Awaiting Decision">Awaiting Decision</option>
+                        <option value="Token Recieved">Token Recieved</option>
+                        <option value="Deal Closed">Converted (Deal Won)</option>
+                        <option value="Deal Lost">Not Interested (Deal Lost)</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Priority</label>
+                      <select name="priority" value={formData.priority} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="" disabled>Select Priority</option>
+                        <option value="Low">Low</option>
+                        <option value="Medium">Medium</option>
+                        <option value="High">High</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Lead Type</label>
+                      <select name="leadType" value={formData.leadType} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="" disabled>Select Type</option>
+                        {segmentClients.length > 0 ? segmentClients.map(client => (
+                          <option key={client} value={client}>{client}</option>
+                        )) : (
+                          <>
+                            <option value="Clinic">Clinic</option>
+                            <option value="Hospital">Hospital</option>
+                            <option value="Physiotherapist">Physiotherapist</option>
+                            <option value="Distributor">Distributor</option>
+                          </>
+                        )}
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+
+                    {formData.leadType === 'Other' && (
+                      <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                        <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Custom Type</label>
+                        <input type="text" required name="customLeadType" value={formData.customLeadType} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="Specify type" />
+                      </div>
+                    )}
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Place</label>
+                      <input type="text" name="place" value={formData.place} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="City or State" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Country</label>
+                      <input type="text" name="country" value={formData.country} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="Country" />
+                    </div>
+                  </div>
+
+                  {/* Right Column */}
+                  <div className="flex flex-col gap-1 mt-6 lg:mt-0">
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Contact & Pipeline</h3>
+                    
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Contact Name</label>
+                      <input type="text" name="personOfContact" value={formData.personOfContact} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="Primary Contact" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Role / Title</label>
+                      <input type="text" name="pocDesignation" value={formData.pocDesignation} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. Director" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Phone Number*</label>
+                      <input type="text" required name="contactNo" value={formData.contactNo} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="+1 (555) 000-0000" />
+                    </div>
+                    <RenderSimilarClients fieldName="contactNo" />
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Email Address</label>
+                      <input type="email" name="email" value={formData.email} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="email@example.com" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Referral Source</label>
+                      <input type="text" name="referralPerson" value={formData.referralPerson} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. Website, Partner" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Quoted Price</label>
+                      <input type="number" name="fPrice" value={formData.fPrice} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="0.00" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Agreed Price</label>
+                      <input type="number" name="lPrice" value={formData.lPrice} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="0.00" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Next Follow-Up</label>
+                      <input type="date" name="nextFollowUp" value={formData.nextFollowUp} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-8">
+                  <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Notes & Remarks</h3>
+                  <textarea name="remarks" value={formData.remarks} onChange={handleInputChange} rows="3" className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Add any additional context, meeting notes, or internal remarks here..."></textarea>
+                </div>
+              </div>
+
+              <div className="p-4 sm:px-8 border-t border-zinc-100 bg-zinc-50/50 flex items-center justify-end gap-3">
+                <button type="button" onClick={() => {
+                  setIsModalOpen(false);
+                  setEditingLeadId(null);
+                  setFormData({ date: new Date().toISOString().split('T')[0], clientName: '', name: '', priority: '', place: '', country: '', personOfContact: '', pocDesignation: '', contactNo: '', personOfContact2: '', contactNo2: '', referralPerson: '', email: '', currentStatus: 'New Lead', fPrice: '', lPrice: '', lastContacted: '', nextFollowUp: '', remarks: '', leadType: 'Hospital', customLeadType: '', assignedToName: isAdmin ? '' : (employeeData?.name || ''), message: '' });
+                }} disabled={isSubmitting} className="px-5 py-2.5 rounded-xl text-[13px] font-semibold text-zinc-600 hover:bg-zinc-200/80 transition-colors">
+                  Discard
+                </button>
+                <button type="submit" disabled={isSubmitting} className="px-6 py-2.5 rounded-xl text-[13px] font-semibold text-white bg-black hover:bg-zinc-800 transition-colors flex items-center justify-center gap-2 shadow-sm">
+                  {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : (editingLeadId ? 'Save Changes' : 'Create Lead')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Add Ad Lead Modal */}
+      {isAdLeadModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isSubmitting && setIsAdLeadModalOpen(false)}></div>
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-5 border-b border-zinc-100 bg-zinc-50/50">
+              <h2 className="text-[18px] font-semibold text-zinc-900">{editingLeadId ? 'Edit Ad Lead' : 'New Ad Lead'}</h2>
+              <button type="button" onClick={() => {
+                if (!isSubmitting) {
+                  setIsAdLeadModalOpen(false);
+                  setEditingLeadId(null);
+                  setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: 'Hospital', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
+                }
+              }} className="text-zinc-400 hover:text-black transition-colors p-1 bg-white rounded-full shadow-sm border border-zinc-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleSaveAdLead} className="flex flex-col max-h-[85vh]">
+              <div className="p-6 sm:p-8 overflow-y-auto no-scrollbar flex-1 bg-white">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-2">
+                  
+                  {/* Left Column */}
+                  <div className="flex flex-col gap-1">
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Core Details</h3>
+                    
+                    <div className="flex flex-col py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <div className="flex items-center w-full">
+                        <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Contact Name</label>
+                        <input type="text" list="global-client-names" name="name" value={adLeadFormData.name} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. Dr. Arun Kumar" />
+                      </div>
+                      <RenderSimilarClients fieldName="name" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Institution</label>
+                      <input type="text" name="institutionName" value={adLeadFormData.institutionName} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. City Hospital" />
+                    </div>
+                    <RenderSimilarClients fieldName="institutionName" />
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Contact No*</label>
+                      <input type="text" required name="contactNumber" value={adLeadFormData.contactNumber} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="+91 98765 43210" />
+                    </div>
+                    <RenderSimilarClients fieldName="contactNumber" />
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Region</label>
+                      <input type="text" list="ad-lead-regions" name="region" value={adLeadFormData.region} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. Ernakulam" />
+                      <datalist id="ad-lead-regions">
+                        {availableRegions.map(r => <option key={r} value={r} />)}
+                      </datalist>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Lead Type</label>
+                      <select name="leadType" value={adLeadFormData.leadType} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="" disabled>Select Type</option>
+                        {segmentClients.length > 0 ? segmentClients.map(client => (
+                          <option key={client} value={client}>{client}</option>
+                        )) : (
+                          <>
+                            <option value="Hospital">Hospital</option>
+                            <option value="Distributor">Distributor</option>
+                            <option value="Physiotherapist">Physiotherapist</option>
+                            <option value="Clinic">Clinic</option>
+                            <option value="Pharmacy">Pharmacy</option>
+                            <option value="Nursing Home">Nursing Home</option>
+                          </>
+                        )}
+                        <option value="Other">Other</option>
+                      </select>
+                    </div>
+
+                    {adLeadFormData.leadType === 'Other' && (
+                      <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                        <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Specify Type*</label>
+                        <input type="text" required name="customLeadType" value={adLeadFormData.customLeadType} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. Rehab Center" />
+                      </div>
+                    )}
+                    
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Ad Campaign</label>
+                      <select name="campaign" value={adLeadFormData.campaign || ''} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="">No Campaign</option>
+                        {adCampaignsList.filter(c => c.status === 'Active').map(camp => (
+                          <option key={camp.id} value={camp.name}>{camp.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Status</label>
+                      <select name="currentStatus" value={adLeadFormData.currentStatus || 'New Lead'} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="New Lead">New Lead</option>
+                        <option value="Called, no response">Called, No Response</option>
+                        <option value="Contacted">Contacted</option>
+                        <option value="Connected via whatsapp">Connected via whatsapp</option>
+                        <option value="Interested">Interested</option>
+                        <option value="Follow up needed">Follow-Up Needed</option>
+                        <option value="Quotation Sent">Quotation Sent</option>
+                        <option value="Awaiting Decision">Awaiting Decision</option>
+                        <option value="Token Recieved">Token Recieved</option>
+                        <option value="Deal Closed">Converted (Deal Won)</option>
+                        <option value="Deal Lost">Not Interested (Deal Lost)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Right Column */}
+                  <div className="flex flex-col gap-1 mt-6 lg:mt-0">
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Tracking & Assignment</h3>
+                    
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Priority</label>
+                      <select name="priority" value={adLeadFormData.priority} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="Urgent">⚡ Urgent</option>
+                        <option value="High">🔴 High</option>
+                        <option value="Medium">🟡 Medium</option>
+                        <option value="Low">🟢 Low</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Follow-Up Date</label>
+                      <input type="date" name="followUpDate" value={adLeadFormData.followUpDate} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none" />
+                    </div>
+
+                    {(isAdmin || isManager || canManageAdLeads) && (
+                      <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                        <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Assign To*</label>
+                        <select 
+                          required 
+                          name="assignedToUid" 
+                          value={adLeadFormData.assignedToUid} 
+                          onChange={(e) => {
+                            const emp = allEmployees.find(emp => emp.uid === e.target.value);
+                            setAdLeadFormData(prev => ({
+                              ...prev,
+                              assignedToUid: e.target.value,
+                              assignedToName: emp ? (emp.name || emp.empName) : ''
+                            }));
+                          }} 
+                          className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer"
+                        >
+                          <option value="">Assign lead...</option>
+                          {allEmployees.filter(e => e.isActive !== false).map(emp => (
+                            <option key={emp.id} value={emp.uid}>{emp.name || emp.empName}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="mt-8 flex flex-col gap-6">
+                  <div>
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Context & Details</h3>
+                    <textarea name="message" value={adLeadFormData.message} onChange={handleAdLeadInputChange} rows="2" className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="What did the lead enquire about? Any context from the ad..."></textarea>
+                  </div>
+                  <div>
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Internal Remarks</h3>
+                    <textarea name="remarks" value={adLeadFormData.remarks} onChange={handleAdLeadInputChange} rows="2" className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Internal notes for the team..."></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 sm:px-8 border-t border-zinc-100 bg-zinc-50/50 flex items-center justify-end gap-3">
+                <button type="button" onClick={() => {
+                  setIsAdLeadModalOpen(false);
+                  setEditingLeadId(null);
+                  setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: '', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
+                }} disabled={isSubmitting} className="px-5 py-2.5 rounded-xl text-[13px] font-semibold text-zinc-600 hover:bg-zinc-200/80 transition-colors">
+                  Discard
+                </button>
+                <button type="submit" disabled={isSubmitting} className="px-6 py-2.5 rounded-xl text-[13px] font-semibold text-white bg-black hover:bg-zinc-800 transition-colors flex items-center justify-center gap-2 shadow-sm">
+                  {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : (editingLeadId ? 'Save Changes' : 'Create Ad Lead')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Add Distributor Modal */}
+      {isDistributorModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isSubmitting && setIsDistributorModalOpen(false)}></div>
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center justify-between p-5 border-b border-zinc-100 bg-zinc-50/50">
+              <h2 className="text-[18px] font-semibold text-zinc-900">{editingLeadId ? 'Edit Distributor' : 'New Distributor'}</h2>
+              <button type="button" onClick={() => {
+                if (!isSubmitting) {
+                  setIsDistributorModalOpen(false);
+                  setEditingLeadId(null);
+                  setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+                }
+              }} className="text-zinc-400 hover:text-black transition-colors p-1 bg-white rounded-full shadow-sm border border-zinc-200">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleSaveDistributor} className="flex flex-col max-h-[85vh]">
+              <div className="p-6 sm:p-8 overflow-y-auto no-scrollbar flex-1 bg-white">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-2">
+                  
+                  {/* Left Column */}
+                  <div className="flex flex-col gap-1">
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Distributor Profile</h3>
+                    
+                    <div className="flex flex-col py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <div className="flex items-center w-full">
+                        <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Firm Name*</label>
+                        <input type="text" required name="distributorName" value={distributorFormData.distributorName} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. MedSupply Co." />
+                      </div>
+                      <RenderSimilarClients fieldName="distributorName" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">State*</label>
+                      <select required name="state" value={distributorFormData.state} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="" disabled>Select State</option>
+                        {["Andhra Pradesh","Arunachal Pradesh","Assam","Bihar","Chhattisgarh","Goa","Gujarat","Haryana","Himachal Pradesh","Jharkhand","Karnataka","Kerala","Madhya Pradesh","Maharashtra","Manipur","Meghalaya","Mizoram","Nagaland","Odisha","Punjab","Rajasthan","Sikkim","Tamil Nadu","Telangana","Tripura","Uttar Pradesh","Uttarakhand","West Bengal","Delhi","Jammu & Kashmir","Ladakh","Puducherry"].map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Region</label>
+                      <input type="text" name="region" value={distributorFormData.region} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. North, South" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Exclusive?</label>
+                      <select name="exclusive" value={distributorFormData.exclusive} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none cursor-pointer">
+                        <option value="" disabled>Select</option>
+                        <option value="Yes">Yes – Exclusive</option>
+                        <option value="No">No – Non-exclusive</option>
+                      </select>
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Team Size</label>
+                      <input type="number" min="1" name="teamSize" value={distributorFormData.teamSize} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="No. of reps" />
+                    </div>
+                  </div>
+
+                  {/* Right Column */}
+                  <div className="flex flex-col gap-1 mt-6 lg:mt-0">
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Contact & Legal</h3>
+                    
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Contact Name*</label>
+                      <input type="text" required name="contactPersonName" value={distributorFormData.contactPersonName} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="Primary Contact" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Contact No*</label>
+                      <input type="tel" required name="contactNumber" value={distributorFormData.contactNumber} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" />
+                    </div>
+                    <RenderSimilarClients fieldName="contactNumber" />
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Email</label>
+                      <input type="email" name="email" value={distributorFormData.email} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">GST Number</label>
+                      <input type="text" name="gstNumber" value={distributorFormData.gstNumber} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" />
+                    </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Year Est.</label>
+                      <input type="number" name="establishedYear" value={distributorFormData.establishedYear} onChange={handleDistributorInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none placeholder:text-zinc-300" placeholder="e.g. 2010" />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-8 flex flex-col gap-6">
+                  <div>
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Business Coverage</h3>
+                    <textarea name="productLinesHandled" value={distributorFormData.productLinesHandled} onChange={handleDistributorInputChange} rows="2" className="w-full mb-3 bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Product Lines Handled (e.g. Surgical instruments)"></textarea>
+                    <textarea name="territoryDescription" value={distributorFormData.territoryDescription} onChange={handleDistributorInputChange} rows="2" className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Territory / Coverage Description (e.g. All districts in Kerala)"></textarea>
+                    <textarea name="address" value={distributorFormData.address} onChange={handleDistributorInputChange} rows="2" className="w-full mt-3 bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Full Postal Address"></textarea>
+                  </div>
+                  
+                  <div>
+                    <h3 className="text-[11px] font-bold text-zinc-400 uppercase tracking-widest mb-3 pb-2 border-b border-zinc-100">Status & Tracking</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[11px] font-semibold text-zinc-500">Current Status</label>
+                        <select name="currentStatus" value={distributorFormData.currentStatus} onChange={handleDistributorInputChange} className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-lg p-2.5 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors cursor-pointer">
+                          <option value="Haven't yet contacted">Haven't yet contacted</option>
+                          <option value="Called, no response">Called, no response</option>
+                          <option value="Contacted and discussed via phone">Contacted and discussed via phone</option>
+                          <option value="Online demo done">Online demo done</option>
+                          <option value="Live demo done">Live demo done</option>
+                          <option value="Hospital presentation done">Hospital presentation done</option>
+                          <option value="Agreement Sent & awaiting response">Agreement Sent & waiting</option>
+                          <option value="Agreement Signed">Agreement Signed</option>
+                          <option value="Purchased Demo Piece">Purchased Demo Piece</option>
+                          <option value="Doing Sales">Doing Sales</option>
+                          <option value="Inactive">Inactive</option>
+                          <option value="Terminated">Terminated</option>
+                        </select>
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[11px] font-semibold text-zinc-500">Last Meeting Date</label>
+                        <input type="date" name="lastMeetingDate" value={distributorFormData.lastMeetingDate} onChange={handleDistributorInputChange} className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-lg p-2.5 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" />
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[11px] font-semibold text-zinc-500">Next Follow-Up</label>
+                        <input type="date" name="nextFollowUp" value={distributorFormData.nextFollowUp} onChange={handleDistributorInputChange} className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-lg p-2.5 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" />
+                      </div>
+                    </div>
+                    <textarea name="remarks" value={distributorFormData.remarks} onChange={handleDistributorInputChange} rows="2" className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Internal remarks & notes..."></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 sm:px-8 border-t border-zinc-100 bg-zinc-50/50 flex items-center justify-end gap-3">
+                <button type="button" onClick={() => {
+                  setIsDistributorModalOpen(false);
+                  setEditingLeadId(null);
+                  setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+                }} disabled={isSubmitting} className="px-5 py-2.5 rounded-xl text-[13px] font-semibold text-zinc-600 hover:bg-zinc-200/80 transition-colors">
+                  Discard
+                </button>
+                <button type="submit" disabled={isSubmitting} className="px-6 py-2.5 rounded-xl text-[13px] font-semibold text-white bg-black hover:bg-zinc-800 transition-colors flex items-center justify-center gap-2 shadow-sm">
+                  {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : (editingLeadId ? 'Save Changes' : 'Add Distributor')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {isActiveDistributorModalOpen && (
+        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 sm:p-6 backdrop-blur-sm" onClick={() => !isSubmitting && setIsActiveDistributorModalOpen(false)}>
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col transform transition-all animate-in zoom-in-95" onClick={e => e.stopPropagation()}>
+            <div className="bg-gradient-to-r from-emerald-600 to-emerald-500 p-6 flex items-center justify-between relative overflow-hidden">
+               <div className="relative z-10">
+                 <h2 className="text-xl font-bold text-white tracking-tight">Active Distributor Terms</h2>
+                 <p className="text-emerald-100 text-sm mt-1">Specify agreement details for this promotion.</p>
+               </div>
+               <button onClick={() => !isSubmitting && setIsActiveDistributorModalOpen(false)} className="text-emerald-100 hover:text-white transition-colors bg-white/5 hover:bg-white/10 rounded-full p-2 z-20">
+                 <X className="w-5 h-5" />
+               </button>
+            </div>
+            
+            <form onSubmit={handleConvertToActiveDistributor} className="flex flex-col max-h-[80vh] overflow-y-auto no-scrollbar">
+              <div className="p-6 sm:p-8 space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[12px] font-bold text-zinc-700 uppercase tracking-wider">Agreement Date</label>
+                    <input type="date" value={activeDistributorFormData.agreementDate} onChange={(e) => setActiveDistributorFormData({...activeDistributorFormData, agreementDate: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" required />
+                  </div>
+                  <div>
+                    <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider mb-2">Duration (Months) *</label>
+                    <input type="number" min="1" step="1" value={activeDistributorFormData.agreementDurationMonths} onChange={(e) => setActiveDistributorFormData({...activeDistributorFormData, agreementDurationMonths: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" placeholder="e.g. 12" required />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-[12px] font-bold text-zinc-700 uppercase tracking-wider">Exclusivity</label>
+                    <select value={activeDistributorFormData.territoryExclusivity} onChange={(e) => setActiveDistributorFormData({...activeDistributorFormData, territoryExclusivity: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" required>
+                      <option value="No">No</option>
+                      <option value="Yes">Yes</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider mb-2">Distributor Price *</label>
+                    <input type="text" value={activeDistributorFormData.distributorPrice} onChange={(e) => setActiveDistributorFormData({...activeDistributorFormData, distributorPrice: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" placeholder="e.g. $500" required />
+                  </div>
+                  <div className="flex flex-col gap-1 md:col-span-2">
+                    <label className="text-[12px] font-bold text-zinc-700 uppercase tracking-wider">Minimum Target</label>
+                    <input type="text" value={activeDistributorFormData.minimumTarget} onChange={(e) => setActiveDistributorFormData({...activeDistributorFormData, minimumTarget: e.target.value})} className="w-full bg-zinc-50 border border-zinc-200 rounded-lg p-3 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" placeholder="e.g. $50,000 / year" />
+                  </div>
+                  <div className="flex flex-col gap-1 md:col-span-2">
+                    <label className="text-[12px] font-bold text-zinc-700 uppercase tracking-wider">Additional Terms</label>
+                    <textarea value={activeDistributorFormData.remarks} onChange={(e) => setActiveDistributorFormData({...activeDistributorFormData, remarks: e.target.value})} rows="3" className="w-full bg-zinc-50 border border-zinc-200 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Any other specific clauses..."></textarea>
+                  </div>
+                </div>
+              </div>
+              <div className="p-4 sm:px-8 border-t border-zinc-100 bg-zinc-50 flex items-center justify-end gap-3">
+                <button type="button" onClick={() => !isSubmitting && setIsActiveDistributorModalOpen(false)} className="px-5 py-2.5 rounded-xl text-[13px] font-semibold text-zinc-600 hover:bg-zinc-200/80 transition-colors">Cancel</button>
+                <button type="submit" disabled={isSubmitting} className="px-6 py-2.5 rounded-xl text-[13px] font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2 shadow-sm">
+                  {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Promoting...</> : 'Promote Distributor'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      
+      {/* Transfer Lead Modal */}
+      {isTransferModalOpen && quickUpdateLead && (
+        <div className="fixed inset-0 bg-black/60 z-[110] flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => !isSubmitting && setIsTransferModalOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[80vh]" onClick={e => e.stopPropagation()}>
+            <div className="p-5 border-b border-zinc-100 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-zinc-800">Transfer Lead</h3>
+                <p className="text-[12px] text-zinc-500 mt-1">Select an employee to transfer this lead to.</p>
+              </div>
+              <button onClick={() => !isSubmitting && setIsTransferModalOpen(false)} className="text-zinc-400 hover:text-black">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            
+            <div className="p-4 flex-1 overflow-y-auto">
+              <div className="grid grid-cols-1 gap-2">
+                {allEmployees.map(emp => (
+                  <button
+                    key={emp.uid}
+                    onClick={() => setTransferTargetEmployee(emp)}
+                    className={`text-left px-4 py-3 rounded-xl border transition-colors flex flex-col ${transferTargetEmployee?.uid === emp.uid ? 'border-black bg-zinc-50' : 'border-zinc-200 hover:border-zinc-300'}`}
+                  >
+                    <span className="text-[14px] font-bold text-zinc-900">{emp.name}</span>
+                    <span className="text-[12px] text-zinc-500">{emp.email}</span>
+                  </button>
+                ))}
+                {allEmployees.length === 0 && (
+                  <div className="text-center py-8 text-[13px] text-zinc-500">
+                    No employees found.
+                  </div>
+                )}
+              </div>
+            </div>
+            
+            <div className="p-4 border-t border-zinc-100 bg-zinc-50 flex justify-end gap-3">
+              <button type="button" onClick={() => !isSubmitting && setIsTransferModalOpen(false)} className="px-5 py-2 rounded-xl text-[13px] font-medium text-zinc-600 hover:bg-zinc-200 transition-colors">Cancel</button>
+              <button 
+                type="button"
+                onClick={handleTransferLead}
+                disabled={!transferTargetEmployee || isSubmitting} 
+                className="px-5 py-2 rounded-xl text-[13px] font-semibold text-white bg-black hover:bg-zinc-800 disabled:opacity-50 transition-colors flex items-center gap-2"
+              >
+                {isSubmitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Transferring...</> : 'Confirm Transfer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {quickUpdateLead && (
+        <QuickUpdateModal 
+          lead={quickUpdateLead}
+          companyId={companyId}
+          activeSegment={activeSegment}
+          isAdmin={isAdmin}
+          isHR={isHR}
+          activeTab={activeTab}
+          onFullProfile={(lead) => {
+            setSelectedLead(lead);
+            setQuickUpdateLead(null);
+          }}
+          onTransfer={(lead) => setIsTransferModalOpen(true)}
+          onConvertToAd={(activeTab === 'regular' || activeTab === 'distributors') ? (lead) => handleConvertToAdLead(lead) : undefined}
+          onTransferToRegular={(activeTab === 'ads') ? (lead) => handleConvertToRegularLead(lead) : undefined}
+          onPromoteDistributor={(activeTab === 'distributors' && !quickUpdateLead.isActiveDistributor) ? (lead) => {
+            setConvertingDistributorId(lead.id);
+            setActiveDistributorFormData({
+              agreementDate: new Date().toISOString().split('T')[0],
+              agreementDurationMonths: '',
+              territoryExclusivity: 'Non-Exclusive',
+              distributorPrice: '',
+              minimumTarget: '',
+              remarks: ''
+            });
+            setQuickUpdateLead(null);
+            setIsActiveDistributorModalOpen(true);
+          } : undefined}
+          onClose={() => setQuickUpdateLead(null)}
+          onSuccess={(updatedData) => {
+            const updateLocalState = (itemsList) => itemsList.map(it => it.id === quickUpdateLead.id ? { ...it, ...updatedData } : it);
+            if (activeTab === 'regular') setRegularLeads(prev => updateLocalState(prev));
+            if (activeTab === 'ads') setAdLeads(prev => updateLocalState(prev));
+            if (activeTab === 'distributors') setDistributors(prev => updateLocalState(prev));
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+
