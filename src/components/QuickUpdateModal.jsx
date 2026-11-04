@@ -40,16 +40,35 @@ export default function QuickUpdateModal({
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateRemarks, setUpdateRemarks] = useState('');
   const [updateStatusDate, setUpdateStatusDate] = useState(new Date().toISOString().split('T')[0]);
+  const [updateFollowUpDate, setUpdateFollowUpDate] = useState('');
+  const [updateCallTime, setUpdateCallTime] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Infer collection name based on lead._type or activeTab
-  let collectionName = 'leads';
-  if (lead._type === 'adLead' || activeTab === 'ads') collectionName = 'adLeads';
-  if (lead._type === 'distributor' || activeTab === 'distributors') collectionName = 'distributors';
+  // Infer collection name based on lead._type, lead._collectionName, lead._sourceTab, or activeTab
+  const effectiveSegment = lead._segmentId || lead.segment || activeSegment;
+  let collectionName = lead._collectionName || 'leads';
+  if (lead._collectionName) {
+    collectionName = lead._collectionName;
+  } else if (lead._type === 'adLead' || lead._sourceTab === 'ads' || activeTab === 'ads') {
+    collectionName = 'adLeads';
+  } else if (lead._type === 'distributor' || lead._sourceTab === 'distributors' || activeTab === 'distributors') {
+    collectionName = 'distributors';
+  }
 
   useEffect(() => {
     if (lead) {
       setUpdateStatus(lead.currentStatus || 'New Lead');
+      
+      const today = new Date().toISOString().split('T')[0];
+      const existingFollowUp = lead.followUpDate || lead.nextFollowUp || '';
+      // If the follow-up was scheduled for today or earlier, it's being handled now.
+      // Only pre-fill date if it's in the future.
+      if (existingFollowUp && existingFollowUp > today) {
+        setUpdateFollowUpDate(existingFollowUp);
+      } else {
+        setUpdateFollowUpDate('');
+      }
+      setUpdateCallTime(lead.callTime || '');
       
       let lastDate = new Date().toISOString().split('T')[0];
       if (lead.statusHistory && lead.statusHistory.length > 0) {
@@ -73,12 +92,13 @@ export default function QuickUpdateModal({
     setIsSubmitting(true);
     
     try {
-      const docRef = doc(db, 'userData', companyId, 'segments', activeSegment, 'crmData', collectionName, 'items', lead.id);
+      const docRef = doc(db, 'userData', companyId, 'segments', effectiveSegment, 'crmData', collectionName, 'items', lead.id);
       const snap = await getDoc(docRef);
       if (snap.exists()) {
         const item = snap.data();
         
         const effectiveDate = (isAdmin || isHR) && updateStatusDate ? new Date(updateStatusDate) : new Date();
+        const effectiveDateStr = effectiveDate.toISOString().split('T')[0];
         const dateStr = effectiveDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         const remarkAddition = updateRemarks.trim() ? `[${dateStr}] ${updateRemarks}` : '';
         const newRemarks = remarkAddition 
@@ -107,12 +127,29 @@ export default function QuickUpdateModal({
         };
         const statusHistory = [...currentHistory, historyEntry];
 
+        let finalFollowUpDate = updateFollowUpDate ? updateFollowUpDate.trim() : '';
+        let finalCallTime = updateCallTime ? updateCallTime.trim() : '';
+
+        // If a call time is specified for today without an explicit date, set followUpDate to today
+        if (finalCallTime && !finalFollowUpDate) {
+          finalFollowUpDate = effectiveDateStr;
+        }
+
+        // If the follow-up date is today (or empty) and NO call time is specified,
+        // then this contact completes today's follow-up -> remove it from today's follow up!
+        if ((!finalFollowUpDate || finalFollowUpDate <= effectiveDateStr) && !finalCallTime) {
+          finalFollowUpDate = '';
+        }
+
         const updatedData = {
           currentStatus: updateStatus,
           remarks: newRemarks,
           statusHistory,
-          lastContacted: effectiveDate.toISOString().split('T')[0],
-          lastFollowedUp: effectiveDate.toISOString().split('T')[0],
+          callTime: finalCallTime,
+          followUpDate: finalFollowUpDate,
+          nextFollowUp: finalFollowUpDate,
+          lastContacted: effectiveDateStr,
+          lastFollowedUp: effectiveDateStr,
           updatedAt: serverTimestamp()
         };
         
@@ -191,6 +228,33 @@ export default function QuickUpdateModal({
               />
             </div>
           )}
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider">Follow-Up Date & Call Time (Optional)</label>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <input
+                  type="date"
+                  value={updateFollowUpDate}
+                  onChange={(e) => setUpdateFollowUpDate(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black outline-none text-[13px] transition-all text-zinc-800"
+                  title="Follow-Up Date"
+                />
+              </div>
+              <div className="relative">
+                <input
+                  type="time"
+                  value={updateCallTime}
+                  onChange={(e) => setUpdateCallTime(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg focus:bg-white focus:ring-2 focus:ring-black/5 focus:border-black outline-none text-[13px] transition-all text-zinc-800"
+                  placeholder="Select time"
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-zinc-400 mt-1">Specify call time if lead requested to be called at a specific time.</p>
+          </div>
 
           <div>
             <label className="block text-[12px] font-bold text-zinc-700 uppercase tracking-wider mb-2">Add Remarks (Optional)</label>

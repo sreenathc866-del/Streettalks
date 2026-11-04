@@ -150,6 +150,7 @@ export default function CRM() {
     lPrice: '',
     lastContacted: '',
     nextFollowUp: '',
+    callTime: '',
     remarks: '',
     leadType: 'Hospital',
     customLeadType: '',
@@ -168,6 +169,7 @@ export default function CRM() {
     priority: 'Medium',
     remarks: '',
     followUpDate: '',
+    callTime: '',
     assignedToUid: '',
     assignedToName: '',
     message: '',
@@ -178,7 +180,7 @@ export default function CRM() {
     distributorName: '', state: '', region: '', exclusive: '',
     teamSize: '', contactPersonName: '', contactNumber: '', email: '',
     address: '', gstNumber: '', establishedYear: '',
-    currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '',
+    currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', callTime: '',
     productLinesHandled: '', territoryDescription: '', remarks: '',
   });
 
@@ -335,6 +337,7 @@ export default function CRM() {
         lPrice: formData.lPrice,
         lastContacted: formData.lastContacted,
         nextFollowUp: formData.nextFollowUp,
+        callTime: formData.callTime ? formData.callTime.trim() : '',
         remarks: formData.remarks,
         leadType: finalLeadType,
         assignedToName: formData.assignedToName,
@@ -379,7 +382,7 @@ export default function CRM() {
         date: new Date().toISOString().split('T')[0], clientName: '', name: '', priority: '', place: '', country: '', 
         personOfContact: '', pocDesignation: '', contactNo: '', personOfContact2: '', contactNo2: '', 
         referralPerson: '', email: '', currentStatus: 'New Lead', fPrice: '', lPrice: '', 
-        lastContacted: '', nextFollowUp: '', remarks: '', leadType: 'Hospital', customLeadType: '', 
+        lastContacted: '', nextFollowUp: '', callTime: '', remarks: '', leadType: 'Hospital', customLeadType: '', 
         assignedToName: isAdmin ? '' : (employeeData?.name || ''), message: '' 
       });
     } catch (err) {
@@ -503,6 +506,7 @@ export default function CRM() {
         currentStatus: adLeadFormData.currentStatus,
         remarks: adLeadFormData.remarks,
         followUpDate: adLeadFormData.followUpDate,
+        callTime: adLeadFormData.callTime ? adLeadFormData.callTime.trim() : '',
         assignedToUid: (isAdmin || isManager || canManageAdLeads) ? adLeadFormData.assignedToUid : user.uid,
         assignedToName: (isAdmin || isManager || canManageAdLeads) ? adLeadFormData.assignedToName : (employeeData?.name || ''),
         message: adLeadFormData.message,
@@ -542,7 +546,7 @@ export default function CRM() {
       
       setIsAdLeadModalOpen(false);
       setEditingLeadId(null);
-      setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: 'Hospital', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
+      setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: 'Hospital', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', callTime: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
       
       Swal.fire({
         title: editingLeadId ? 'Updated!' : 'Added!',
@@ -609,7 +613,7 @@ export default function CRM() {
 
       setIsDistributorModalOpen(false);
       setEditingLeadId(null);
-      setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+      setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', callTime: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
       
       Swal.fire({
         title: editingLeadId ? 'Updated!' : 'Added!',
@@ -640,6 +644,7 @@ export default function CRM() {
         priority: lead.priority || 'Medium',
         remarks: lead.remarks || '',
         followUpDate: lead.followUpDate || lead.nextFollowUp || '',
+        callTime: lead.callTime || '',
         assignedToUid: lead.assignedToUid || '',
         assignedToName: lead.assignedToName || '',
         message: lead.message || ''
@@ -663,6 +668,7 @@ export default function CRM() {
         currentStatus: lead.currentStatus || 'Contacted',
         lastMeetingDate: lead.lastMeetingDate || '',
         nextFollowUp: lead.nextFollowUp || lead.followUpDate || '',
+        callTime: lead.callTime || '',
         productLinesHandled: lead.productLinesHandled || '',
         territoryDescription: lead.territoryDescription || '',
         remarks: lead.remarks || ''
@@ -690,6 +696,7 @@ export default function CRM() {
       lPrice: lead.lPrice || '',
       lastContacted: lead.lastContacted || '',
       nextFollowUp: lead.nextFollowUp || lead.followUpDate || '',
+      callTime: lead.callTime || '',
       remarks: lead.remarks || '',
       leadType: ['Clinic', 'Hospital', 'Physiotherapist', 'Distributor'].includes(lead.leadType) ? lead.leadType : 'Other',
       customLeadType: ['Clinic', 'Hospital', 'Physiotherapist', 'Distributor'].includes(lead.leadType) ? '' : (lead.leadType || ''),
@@ -1131,50 +1138,59 @@ export default function CRM() {
     }
   }, [location.state, navigate]);
 
+  const fetchGlobalFollowUps = React.useCallback(async () => {
+    if (!companyId) return;
+    try {
+      const segments = ['happymoves', 'gamefaktory'];
+      const collections = ['leads', 'adLeads', 'distributors'];
+      const todayStr = new Date().toISOString().split('T')[0];
+      const allFollowUps = [];
+
+      for (const seg of segments) {
+        for (const col of collections) {
+          const colRef = collection(db, 'userData', companyId, 'segments', seg, 'crmData', col, 'items');
+          const snap = await getDocs(colRef);
+          snap.forEach(docSnap => {
+            const data = docSnap.data();
+            const followUp = data.nextFollowUp || data.followUpDate;
+            if (followUp === todayStr) {
+              // If lead was already contacted today without a specific callTime set, do not show in today's follow up
+              const wasContactedToday = data.lastContacted === todayStr || data.lastFollowedUp === todayStr;
+              if (wasContactedToday && !data.callTime) {
+                return;
+              }
+              const sourceName = col === 'leads' ? 'Regular Lead' : col === 'adLeads' ? 'Ad Lead' : 'Distributor';
+              allFollowUps.push({
+                id: docSnap.id,
+                ...data,
+                _segmentId: seg,
+                _collectionName: col,
+                _type: col === 'leads' ? 'lead' : col === 'adLeads' ? 'adLead' : 'distributor',
+                _sourceCollection: sourceName,
+                _segmentName: seg === 'happymoves' ? 'StreetTalks' : 'Game Faktory',
+                _sourceTab: col === 'leads' ? 'regular' : col === 'adLeads' ? 'ads' : 'distributors'
+              });
+            }
+          });
+        }
+      }
+
+      const filteredFollowUps = allFollowUps.filter(item => {
+        if (isAdmin || isManager) return true;
+        if (item._sourceTab === 'ads' && canManageAdLeads) return true;
+        return item.userId === user?.uid || item.assignedToUid === user?.uid;
+      });
+
+      setTodaysGlobalFollowUps(filteredFollowUps);
+    } catch (err) {
+      console.error("Error fetching global follow ups:", err);
+    }
+  }, [companyId, isAdmin, isManager, canManageAdLeads, user?.uid]);
+
   // Global follow-ups fetch across all segments
   useEffect(() => {
-    if (!companyId) return;
-    const fetchGlobalFollowUps = async () => {
-      try {
-        const segments = ['happymoves', 'gamefaktory'];
-        const collections = ['leads', 'adLeads', 'distributors'];
-        const todayStr = new Date().toISOString().split('T')[0];
-        const allFollowUps = [];
-
-        for (const seg of segments) {
-          for (const col of collections) {
-            const colRef = collection(db, 'userData', companyId, 'segments', seg, 'crmData', col, 'items');
-            const snap = await getDocs(colRef);
-            snap.forEach(docSnap => {
-              const data = docSnap.data();
-              const followUp = data.nextFollowUp || data.followUpDate;
-              if (followUp === todayStr) {
-                const sourceName = col === 'leads' ? 'Regular Lead' : col === 'adLeads' ? 'Ad Lead' : 'Distributor';
-                allFollowUps.push({
-                  id: docSnap.id,
-                  ...data,
-                  _sourceCollection: sourceName,
-                  _segmentName: seg === 'happymoves' ? 'StreetTalks' : 'Game Faktory',
-                  _sourceTab: col === 'leads' ? 'regular' : col === 'adLeads' ? 'ads' : 'distributors'
-                });
-              }
-            });
-          }
-        }
-
-        const filteredFollowUps = allFollowUps.filter(item => {
-          if (isAdmin || isManager) return true;
-          if (item._sourceTab === 'ads' && canManageAdLeads) return true;
-          return item.userId === user?.uid || item.assignedToUid === user?.uid;
-        });
-
-        setTodaysGlobalFollowUps(filteredFollowUps);
-      } catch (err) {
-        console.error("Error fetching global follow ups:", err);
-      }
-    };
     fetchGlobalFollowUps();
-  }, [companyId, isAdmin, isManager, canManageAdLeads, user?.uid]);
+  }, [fetchGlobalFollowUps]);
 
   const getSimilarClients = (query) => {
     if (!query || query.trim().length < 2) {
@@ -1617,7 +1633,7 @@ export default function CRM() {
                 setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: '', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
                 setIsAdLeadModalOpen(true);
               } else if (activeTab === 'distributors') {
-                setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+                setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', callTime: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
                 setIsDistributorModalOpen(true);
               } else {
                 setFormData({ date: new Date().toISOString().split('T')[0], clientName: '', name: '', priority: '', place: '', country: '', personOfContact: '', pocDesignation: '', contactNo: '', personOfContact2: '', contactNo2: '', referralPerson: '', email: '', currentStatus: 'New Lead', fPrice: '', lPrice: '', lastContacted: '', nextFollowUp: '', remarks: '', leadType: 'Hospital', customLeadType: '', assignedToName: isAdmin ? '' : (employeeData?.name || ''), message: '' });
@@ -1657,6 +1673,19 @@ export default function CRM() {
                 <div className="pl-2">
                   <p className="text-[13px] font-bold text-zinc-900 truncate">{lead.clientName || lead.name || lead.distributorName || 'Unnamed'}</p>
                   <p className="text-[11px] text-zinc-500 mt-0.5 truncate">{lead.phone || lead.contactNo || lead.contactNumber || 'No Phone'}</p>
+                  {lead.callTime && (
+                    <div className="mt-1 flex items-center gap-1 text-[11px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60 w-fit">
+                      <Clock className="w-3 h-3 text-amber-600" />
+                      <span>Call at {(() => {
+                        const [h, m] = lead.callTime.split(':');
+                        if (!h || !m) return lead.callTime;
+                        const hour = parseInt(h, 10);
+                        const ampm = hour >= 12 ? 'PM' : 'AM';
+                        const h12 = hour % 12 || 12;
+                        return `${h12}:${m} ${ampm}`;
+                      })()}</span>
+                    </div>
+                  )}
                   <p className="text-[11px] text-zinc-400 mt-1">Ref: {lead.personOfContact || lead.contactPersonName || 'N/A'}</p>
                 </div>
               </div>
@@ -2791,6 +2820,11 @@ export default function CRM() {
                       <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Next Follow-Up</label>
                       <input type="date" name="nextFollowUp" value={formData.nextFollowUp} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none" />
                     </div>
+
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Call Time (Optional)</label>
+                      <input type="time" name="callTime" value={formData.callTime || ''} onChange={handleInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none" />
+                    </div>
                   </div>
                 </div>
 
@@ -2827,7 +2861,7 @@ export default function CRM() {
                 if (!isSubmitting) {
                   setIsAdLeadModalOpen(false);
                   setEditingLeadId(null);
-                  setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: 'Hospital', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
+                  setAdLeadFormData({ name: '', institutionName: '', contactNumber: '', region: '', leadType: 'Hospital', customLeadType: '', currentStatus: 'New Lead', priority: 'Medium', remarks: '', followUpDate: '', callTime: '', assignedToUid: '', assignedToName: '', message: '', campaign: '' });
                 }
               }} className="text-zinc-400 hover:text-black transition-colors p-1 bg-white rounded-full shadow-sm border border-zinc-200">
                 <X className="w-4 h-4" />
@@ -2944,6 +2978,11 @@ export default function CRM() {
                       <input type="date" name="followUpDate" value={adLeadFormData.followUpDate} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none" />
                     </div>
 
+                    <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
+                      <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Call Time (Optional)</label>
+                      <input type="time" name="callTime" value={adLeadFormData.callTime || ''} onChange={handleAdLeadInputChange} className="w-3/5 bg-transparent text-[14px] font-medium text-zinc-900 focus:outline-none" />
+                    </div>
+
                     {(isAdmin || isManager || canManageAdLeads) && (
                       <div className="flex items-center py-2.5 border-b border-zinc-100 focus-within:border-black transition-colors group">
                         <label className="w-2/5 text-[12px] font-semibold text-zinc-500 group-focus-within:text-black transition-colors">Assign To*</label>
@@ -3011,7 +3050,7 @@ export default function CRM() {
                 if (!isSubmitting) {
                   setIsDistributorModalOpen(false);
                   setEditingLeadId(null);
-                  setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+                  setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', callTime: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
                 }
               }} className="text-zinc-400 hover:text-black transition-colors p-1 bg-white rounded-full shadow-sm border border-zinc-200">
                 <X className="w-4 h-4" />
@@ -3130,6 +3169,10 @@ export default function CRM() {
                         <label className="text-[11px] font-semibold text-zinc-500">Next Follow-Up</label>
                         <input type="date" name="nextFollowUp" value={distributorFormData.nextFollowUp} onChange={handleDistributorInputChange} className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-lg p-2.5 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" />
                       </div>
+                      <div className="flex flex-col gap-1">
+                        <label className="text-[11px] font-semibold text-zinc-500">Call Time (Optional)</label>
+                        <input type="time" name="callTime" value={distributorFormData.callTime || ''} onChange={handleDistributorInputChange} className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-lg p-2.5 text-[13px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors" />
+                      </div>
                     </div>
                     <textarea name="remarks" value={distributorFormData.remarks} onChange={handleDistributorInputChange} rows="2" className="w-full bg-zinc-50/50 border border-zinc-200/60 rounded-xl p-4 text-[14px] font-medium text-zinc-900 focus:outline-none focus:bg-white focus:border-black transition-colors resize-none placeholder:text-zinc-400" placeholder="Internal remarks & notes..."></textarea>
                   </div>
@@ -3140,7 +3183,7 @@ export default function CRM() {
                 <button type="button" onClick={() => {
                   setIsDistributorModalOpen(false);
                   setEditingLeadId(null);
-                  setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
+                  setDistributorFormData({ distributorName: '', state: '', region: '', exclusive: '', teamSize: '', contactPersonName: '', contactNumber: '', email: '', address: '', gstNumber: '', establishedYear: '', currentStatus: 'Contacted', lastMeetingDate: new Date().toISOString().split('T')[0], nextFollowUp: '', callTime: '', productLinesHandled: '', territoryDescription: '', remarks: '' });
                 }} disabled={isSubmitting} className="px-5 py-2.5 rounded-xl text-[13px] font-semibold text-zinc-600 hover:bg-zinc-200/80 transition-colors">
                   Discard
                 </button>
@@ -3288,9 +3331,21 @@ export default function CRM() {
           onClose={() => setQuickUpdateLead(null)}
           onSuccess={(updatedData) => {
             const updateLocalState = (itemsList) => itemsList.map(it => it.id === quickUpdateLead.id ? { ...it, ...updatedData } : it);
-            if (activeTab === 'regular') setRegularLeads(prev => updateLocalState(prev));
-            if (activeTab === 'ads') setAdLeads(prev => updateLocalState(prev));
-            if (activeTab === 'distributors') setDistributors(prev => updateLocalState(prev));
+            setRegularLeads(prev => updateLocalState(prev));
+            setAdLeads(prev => updateLocalState(prev));
+            setDistributors(prev => updateLocalState(prev));
+
+            // Immediately remove from Today's Follow-Ups unless rescheduled for today with a specific callTime
+            const todayStr = new Date().toISOString().split('T')[0];
+            const keepInToday = (updatedData.followUpDate === todayStr || updatedData.nextFollowUp === todayStr) && !!updatedData.callTime;
+            setTodaysGlobalFollowUps(prev => {
+              if (keepInToday) {
+                return prev.map(it => it.id === quickUpdateLead.id ? { ...it, ...updatedData } : it);
+              }
+              return prev.filter(it => it.id !== quickUpdateLead.id);
+            });
+
+            fetchGlobalFollowUps();
           }}
         />
       )}

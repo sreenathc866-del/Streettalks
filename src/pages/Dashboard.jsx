@@ -82,10 +82,18 @@ export default function Dashboard() {
               const data = docSnap.data();
               const followUp = data.nextFollowUp || data.followUpDate;
               if (followUp === todayDate) {
+                // If lead was already contacted today without a specific callTime set, do not show in today's follow up
+                const wasContactedToday = data.lastContacted === todayDate || data.lastFollowedUp === todayDate;
+                if (wasContactedToday && !data.callTime) {
+                  return;
+                }
                 const sourceName = col === 'leads' ? 'Regular Lead' : col === 'adLeads' ? 'Ad Lead' : 'Distributor';
                 allFollowUps.push({
                   id: docSnap.id,
                   ...data,
+                  _segmentId: seg,
+                  _collectionName: col,
+                  _type: col === 'leads' ? 'lead' : col === 'adLeads' ? 'adLead' : 'distributor',
                   _sourceCollection: sourceName,
                   _segmentName: seg === 'happymoves' ? 'StreetTalks' : 'Game Faktory',
                   _sourceTab: col === 'leads' ? 'regular' : col === 'adLeads' ? 'ads' : 'distributors'
@@ -403,6 +411,19 @@ export default function Dashboard() {
                 <div className="pl-2">
                   <p className="text-[13px] font-bold text-zinc-900 truncate">{lead.clientName || lead.name || lead.distributorName || 'Unnamed'}</p>
                   <p className="text-[11px] text-zinc-500 mt-0.5 truncate">{lead.phone || lead.contactNo || lead.contactNumber || 'No Phone'}</p>
+                  {lead.callTime && (
+                    <div className="mt-1 flex items-center gap-1 text-[11px] font-bold text-sky-800 bg-sky-50 px-1.5 py-0.5 rounded border border-sky-200/60 w-fit">
+                      <Clock className="w-3 h-3 text-sky-600" />
+                      <span>Call at {(() => {
+                        const [h, m] = lead.callTime.split(':');
+                        if (!h || !m) return lead.callTime;
+                        const hour = parseInt(h, 10);
+                        const ampm = hour >= 12 ? 'PM' : 'AM';
+                        const h12 = hour % 12 || 12;
+                        return `${h12}:${m} ${ampm}`;
+                      })()}</span>
+                    </div>
+                  )}
                   <p className="text-[11px] text-zinc-400 mt-1">Ref: {lead.personOfContact || lead.contactPersonName || 'N/A'}</p>
                 </div>
               </div>
